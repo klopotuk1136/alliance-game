@@ -1,0 +1,16 @@
+# Normal mode:  docker compose up -d --build
+# Test mode:    docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
+services:
+  game:
+    build: .
+    image: alliance-game:latest
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${ALLIANCE_PORT:-8080}:8080"
+    volumes:
+      - alliance-data:/data
+    command: ["node", "server/main.ts"]
+
+volumes:
+  alliance-data:

@@ -1,0 +1,9 @@
+# Test mode overlay: new rooms give AP every 30 seconds and their lobby lasts 10 minutes.
+# Uses a separate database file, so test games never mix with real ones.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
+#
+# Add more --set flags to change any default, e.g. "--set", "tickIntervalSec=10".
+services:
+  game:
+    command: ["node", "server/main.ts", "--test-mode", "--db", "/data/alliance-test.db"]
