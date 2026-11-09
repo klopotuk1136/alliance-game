@@ -16,6 +16,8 @@ export default defineConfig({
     proxy: {
       '/api': 'http://localhost:8080',
       '/flags': 'http://localhost:8080',
+      '/stickers': 'http://localhost:8080',
+      '/avatars': 'http://localhost:8080',
       '/ws': { target: 'ws://localhost:8080', ws: true },
     },
   },

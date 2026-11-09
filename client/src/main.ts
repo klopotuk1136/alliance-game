@@ -1,8 +1,12 @@
+import '@fontsource-variable/inter';
+import '@fontsource-variable/fraunces';
 import './style.css';
 import { ApiError, clearToken, fetchMe, getToken } from './api.ts';
 import { showAuth } from './auth.ts';
+import { h, replaceChildren } from './dom.ts';
 import { showHome } from './home.ts';
 import { setRouter } from './nav.ts';
+import { setMyProfile } from './profile.ts';
 import { showRoom } from './room.ts';
 
 const app = document.getElementById('app')!;
@@ -20,7 +24,9 @@ async function route(): Promise<void> {
   }
   let user;
   try {
-    user = await fetchMe();
+    const me = await fetchMe();
+    user = me.user;
+    setMyProfile(me.profile, me.user);
   } catch (err) {
     if (gen !== generation) return;
     if (err instanceof ApiError && err.status === 401) {
@@ -28,7 +34,7 @@ async function route(): Promise<void> {
       void route();
       return;
     }
-    app.textContent = "Can't reach the server. Retrying…";
+    replaceChildren(app, h('div', { class: 'loading' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), "Can't reach the server. Retrying…"));
     setTimeout(() => {
       if (gen === generation) void route();
     }, 3000);

@@ -69,6 +69,11 @@ With the default settings:
 On a computer, point at a cell and press the key. Actions fire instantly. On a phone, tap
 a cell, then tap an action button.
 
+**Chat:** everyone in the room shares the **Everyone** channel, and you can open a private
+conversation with any player (the **Private message…** menu). Private messages are only
+ever sent to their two players; the reveal at the end of the game does not include them.
+Chat works in the lobby, during the game (also once you're eliminated) and after it.
+
 **What you see:** everyone's position, and your own HP, AP and range. You never see other
 players' stats. When you're hit you lose HP but don't learn who did it. AP you receive is
 anonymous too. Eliminations are public, including who dealt the final hit.
@@ -86,6 +91,7 @@ docker compose exec game alliance help
 | `alliance status` | Rooms and users at a glance |
 | `alliance room <code>` | Full room state, including hidden stats |
 | `alliance log <code> [n]` | Full event history of a room |
+| `alliance chat <code> [n]` | Chat of a room, private messages included |
 | `alliance users` | List accounts |
 | `alliance user-create <user> <password>` | Create an account |
 | `alliance user-passwd <user> <password>` | Reset a password |
@@ -124,7 +130,7 @@ lobby; the admin can change any room at any time with
 | `tickIntervalSec` | 30 | Seconds between ticks in interval mode |
 | `lobbyDurationSec` | 86400 | Lobby length before the automatic start |
 
-Server startup flags (`node server/main.ts --help`): `--port`, `--db`, `--test-mode`,
+Server startup flags (`node server/main.ts --help`): `--port`, `--db`, `--test-mode`, `--trust-proxy`,
 `--set key=value` (defaults for new rooms), `--admin-socket`, `--static`.
 
 ### Rules for edge cases
@@ -136,6 +142,36 @@ Server startup flags (`node server/main.ts --help`): `--port`, `--db`, `--test-m
 - While a game is paused, nobody can act and no AP is given. Missed ticks are skipped.
 - If the lobby time runs out with fewer than 2 players, the room waits for its creator to
   start it.
+
+## Deploy to Railway
+
+The repo is ready for [Railway](https://railway.com): `railway.json` tells it to build the
+`Dockerfile` (tests run during the build) and to health-check `/api/flags`.
+
+1. In Railway: **New Project → Deploy from GitHub repo**, pick this repository. Every push
+   to `main` deploys again.
+2. Open the service → **Settings → Volumes** (or right-click the service → *Attach volume*)
+   and mount a volume at **`/data`**. The database lives there; without it every deploy
+   starts from an empty database.
+3. **Variables**: add `RAILWAY_RUN_UID=0`. Railway mounts volumes as root, and the
+   container normally runs as the unprivileged `node` user, which then can't write the
+   database.
+4. **Settings → Networking → Generate Domain** to get a public `https://….up.railway.app`
+   address. WebSockets work over it without extra setup.
+
+Railway sets `PORT` itself, and the server detects it runs behind Railway's proxy, so the
+login rate limit counts real client IPs. Keep a single replica: the game state lives in
+one process and one SQLite file.
+
+Admin commands run inside the container through the Railway CLI:
+
+```bash
+railway ssh            # in the linked project directory
+alliance status
+```
+
+For a test deployment, set the start command (Settings → Deploy → Custom Start Command)
+to `node server/main.ts --test-mode`.
 
 ## Development without Docker
 

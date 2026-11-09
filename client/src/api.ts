@@ -4,7 +4,7 @@
 // same machine can be logged in as different players. A copy in localStorage lets a
 // freshly opened tab start out logged in as the last account used.
 
-import type { FlagInfo, UserInfo } from '../../shared/protocol.ts';
+import type { FlagInfo, MeResponse } from '../../shared/protocol.ts';
 
 const SESSION_KEY = 'alliance.token';
 const LAST_KEY = 'alliance.lastToken';
@@ -47,14 +47,15 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const binary = body instanceof Blob;
+  if (body !== undefined) headers['Content-Type'] = binary ? body.type || 'application/octet-stream' : 'application/json';
   let res: Response;
   try {
-    res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    res = await fetch(path, { method, headers, body: body === undefined ? undefined : binary ? body : JSON.stringify(body) });
   } catch {
     throw new ApiError(0, "Can't reach the server");
   }
@@ -63,9 +64,9 @@ export async function api<T>(method: 'GET' | 'POST', path: string, body?: unknow
   return data as T;
 }
 
-export async function fetchMe(): Promise<UserInfo> {
-  const res = await api<{ user: UserInfo }>('GET', '/api/me');
-  return res.user;
+/** The account and its profile (`profile` is missing only on an older server). */
+export function fetchMe(): Promise<MeResponse> {
+  return api<MeResponse>('GET', '/api/me');
 }
 
 let flagsPromise: Promise<FlagInfo[]> | null = null;

@@ -12,6 +12,8 @@ export interface RoomSnapshot {
   settings: GameSettings;
   players: Map<number, PlayerState>;
   events: StoredEvent[];
+  /** Username and avatar file of an account; without it players carry neither. */
+  userBrief?(userId: number): { username: string; avatar: string | null } | undefined;
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
@@ -146,17 +148,25 @@ export function buildView(room: RoomSnapshot, viewerUserId: number, now: number)
   // Outsiders may look at a lobby (to decide whether to join) but not at a running game.
   const canSeePlayers = row.phase === 'lobby' || me !== undefined;
   const players: PublicPlayer[] = canSeePlayers
-    ? [...room.players.values()].map((p) => ({
-        pid: p.pid,
-        nickname: p.nickname,
-        flag: p.flag,
-        alive: p.alive,
-        q: p.alive ? p.q : null,
-        r: p.alive ? p.r : null,
-        eliminatedBy: p.eliminatedBy,
-        eliminatedAt: p.eliminatedAt,
-        isCreator: p.userId === row.creator_id,
-      }))
+    ? [...room.players.values()].map((p) => {
+        const pub: PublicPlayer = {
+          pid: p.pid,
+          nickname: p.nickname,
+          flag: p.flag,
+          alive: p.alive,
+          q: p.alive ? p.q : null,
+          r: p.alive ? p.r : null,
+          eliminatedBy: p.eliminatedBy,
+          eliminatedAt: p.eliminatedAt,
+          isCreator: p.userId === row.creator_id,
+        };
+        const brief = room.userBrief?.(p.userId);
+        if (brief) {
+          pub.username = brief.username;
+          if (brief.avatar) pub.avatar = `/avatars/${brief.avatar}`;
+        }
+        return pub;
+      })
     : [];
   return {
     code: row.code,

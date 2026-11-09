@@ -55,10 +55,10 @@ export function flagImg(code: string, cls = 'flag', ratio: '4x3' | '1x1' = '4x3'
 
 let toastHost: HTMLElement | null = null;
 
-export function toast(message: string, kind: 'error' | 'info' | 'good' = 'info', ms = 2200): void {
+export function toast(message: string, kind: 'error' | 'info' | 'good' = 'info', ms = 2200, lead?: Node | null): void {
   toastHost ??= document.getElementById('toasts');
   if (!toastHost) return;
-  const el = h('div', { class: `toast ${kind}` }, message);
+  const el = h('div', { class: `toast ${kind}`, role: kind === 'error' ? 'alert' : 'status' }, h('span', { class: 'toast-mark', 'aria-hidden': 'true' }, lead ?? null), h('span', { class: 'toast-text' }, message));
   toastHost.appendChild(el);
   while (toastHost.children.length > 4) toastHost.firstElementChild?.remove();
   setTimeout(() => {

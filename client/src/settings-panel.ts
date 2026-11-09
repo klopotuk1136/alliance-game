@@ -4,6 +4,7 @@
 import { cellCount } from '../../shared/hex.ts';
 import { effectiveSpawnDistance, SETTING_RULES, type GameSettings } from '../../shared/settings.ts';
 import { h, replaceChildren, toast } from './dom.ts';
+import { icon, Segmented, Select, Stepper, type ListOption } from './ui.ts';
 
 type Key = keyof GameSettings;
 type Value = string | number;
@@ -37,20 +38,32 @@ function intRule(key: Key): { min: number; max: number } {
   return rule.kind === 'int' ? { min: rule.min, max: rule.max } : { min: 0, max: 0 };
 }
 
-let zoneList: HTMLDataListElement | null = null;
+let zoneOptions: ListOption[] | null = null;
 
-function timeZoneList(): HTMLDataListElement {
-  if (zoneList) return zoneList;
+/** Every IANA time zone with its current UTC offset, for the searchable select. */
+function timeZoneOptions(): ListOption[] {
+  if (zoneOptions) return zoneOptions;
   let zones: string[] = [];
   try {
     zones = Intl.supportedValuesOf('timeZone');
   } catch {
     zones = ['Europe/Berlin', 'Europe/London', 'Europe/Kyiv', 'America/New_York', 'UTC'];
   }
-  zoneList = h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z })));
-  document.body.appendChild(zoneList);
-  return zoneList;
+  if (!zones.includes('UTC')) zones.push('UTC');
+  const now = new Date();
+  zoneOptions = zones.map((z) => {
+    let hint = '';
+    try {
+      hint = new Intl.DateTimeFormat('en-US', { timeZone: z, timeZoneName: 'shortOffset' }).formatToParts(now).find((p) => p.type === 'timeZoneName')?.value ?? '';
+    } catch {
+      hint = '';
+    }
+    return { value: z, label: z.replace(/_/g, ' '), hint: hint === 'GMT' ? 'UTC' : hint.replace('GMT', 'UTC'), keywords: z };
+  });
+  return zoneOptions;
 }
+
+let fieldId = 0;
 
 export class SettingsPanel {
   readonly el: HTMLElement;
@@ -64,11 +77,18 @@ export class SettingsPanel {
   private readonly saveBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Save settings');
   private readonly discardBtn = h('button', { class: 'btn ghost', type: 'button' }, 'Discard');
   private readonly statusEl = h('span', { class: 'muted small' });
+  /** Live map radius for the lobby preview: the creator's unsaved stepper value, else the saved one. */
+  onRadiusPreview: (radius: number) => void = () => undefined;
 
   constructor(onSave: (changes: Record<string, Value>) => void) {
     this.onSave = onSave;
     this.discardBtn.addEventListener('click', () => this.discard());
-    this.el = h('section', { class: 'card settings-card' }, h('h2', null, 'Game settings'), this.subtitle, this.body);
+    this.el = h(
+      'section',
+      { class: 'card framed settings-card' },
+      h('div', { class: 'settings-head' }, h('h2', { class: 'card-title' }, 'Game settings'), this.subtitle),
+      this.body,
+    );
   }
 
   update(rules: GameSettings, editable: boolean, playerCount: number): void {
@@ -83,6 +103,7 @@ export class SettingsPanel {
     if (mode === 'view') {
       this.subtitle.textContent = 'Set by the room creator. They can change these until the game starts.';
       this.renderSummary(rules);
+      this.onRadiusPreview(rules.gridRadius);
     } else {
       this.subtitle.textContent = 'Only you can change these, until the game starts. Everyone in the lobby sees them.';
       this.syncForm(previous);
@@ -92,7 +113,7 @@ export class SettingsPanel {
   // ---------------------------------------------------------------- read-only summary
 
   private renderSummary(r: GameSettings): void {
-    const row = (label: string, value: string) => [h('dt', null, label), h('dd', null, value)];
+    const row = (label: string, value: string) => h('div', { class: 'summary-row' }, h('dt', null, label), h('dd', null, value));
     replaceChildren(
       this.body,
       h(
@@ -114,33 +135,45 @@ export class SettingsPanel {
 
   // ---------------------------------------------------------------- editable form
 
+  private row(label: string, control: HTMLElement, id: string | null, wide = false, hint?: HTMLElement): HTMLElement {
+    return h(
+      'div',
+      { class: `setting${wide ? ' wide' : ''}` },
+      id ? h('label', { class: 'setting-label', for: id }, label) : h('span', { class: 'setting-label' }, label),
+      control,
+      hint ?? null,
+    );
+  }
+
   private numberField(key: Key, label: string): Field {
     const { min, max } = intRule(key);
-    const input = h('input', { type: 'number', min, max, step: 1, inputmode: 'numeric', required: true });
+    const stepper = new Stepper({ min, max, step: 1 });
+    const id = `set-${++fieldId}`;
+    stepper.input.id = id;
     const hint = h('span', { class: 'setting-hint' });
-    const row = h('label', { class: 'setting' }, h('span', { class: 'setting-label' }, label), input, hint);
+    const row = this.row(label, stepper.el, id, false, hint);
     return {
       key,
       row,
       hint,
-      get: () => (input.value.trim() === '' ? '' : Number(input.value)),
+      get: () => (stepper.value.trim() === '' ? '' : Number(stepper.value)),
       set: (v) => {
-        input.value = String(v);
+        stepper.value = String(v);
       },
     };
   }
 
   private durationField(key: Key, label: string, units: Array<[string, number]>): Field {
-    const num = h('input', { type: 'number', min: 1, step: 'any', inputmode: 'decimal', required: true });
-    const unit = h('select', null, units.map(([name, sec]) => h('option', { value: sec }, name)));
+    const num = new Stepper({ min: 1, step: 1, decimal: true });
+    const id = `set-${++fieldId}`;
+    num.input.id = id;
+    const unit = new Segmented<string>({
+      label: `${label} unit`,
+      options: units.map(([name, sec]) => ({ value: String(sec), label: name })),
+      cls: 'small',
+    });
     const hint = h('span', { class: 'setting-hint' });
-    const row = h(
-      'label',
-      { class: 'setting' },
-      h('span', { class: 'setting-label' }, label),
-      h('span', { class: 'duration' }, num, unit),
-      hint,
-    );
+    const row = this.row(label, h('div', { class: 'duration' }, num.el, unit.el), id, true, hint);
     return {
       key,
       row,
@@ -155,22 +188,46 @@ export class SettingsPanel {
     };
   }
 
-  private selectField(key: Key, label: string, options: Array<[string, string]>): Field {
-    const select = h('select', null, options.map(([value, text]) => h('option', { value }, text)));
-    const row = h('label', { class: 'setting wide' }, h('span', { class: 'setting-label' }, label), select);
+  private segmentField(key: Key, label: string, options: Array<[string, string]>): Field {
+    const seg = new Segmented<string>({ label, options: options.map(([value, text]) => ({ value, label: text })), cls: 'block' });
+    const row = this.row(label, seg.el, null, true);
+    return {
+      key,
+      row,
+      get: () => seg.value,
+      set: (v) => {
+        seg.value = String(v);
+      },
+    };
+  }
+
+  private zoneField(key: Key, label: string): Field {
+    const select = new Select<string>({
+      label,
+      options: timeZoneOptions(),
+      searchable: true,
+      searchPlaceholder: 'Search time zones…',
+      minWidth: 280,
+      cls: 'block',
+    });
+    const row = this.row(label, select.el, null, true);
     return {
       key,
       row,
       get: () => select.value,
       set: (v) => {
-        select.value = String(v);
+        const z = String(v);
+        const opts = timeZoneOptions();
+        if (!opts.some((o) => o.value === z)) select.setOptions([...opts, { value: z, label: z }]);
+        select.value = z;
       },
     };
   }
 
   private textField(key: Key, label: string, attrs: Record<string, string>): Field {
-    const input = h('input', { required: true, ...attrs });
-    const row = h('label', { class: 'setting wide' }, h('span', { class: 'setting-label' }, label), input);
+    const id = `set-${++fieldId}`;
+    const input = h('input', { required: true, id, ...attrs });
+    const row = this.row(label, h('div', { class: 'input-icon' }, icon('clock'), input), id, true);
     return {
       key,
       row,
@@ -190,14 +247,13 @@ export class SettingsPanel {
     const group = (title: string, ...rows: HTMLElement[]) =>
       h('fieldset', { class: 'setting-group' }, h('legend', null, title), ...rows);
 
-    timeZoneList();
     const groups = h(
       'div',
       { class: 'settings-grid' },
       group(
         'Room',
         add(this.numberField('maxPlayers', 'Max players')),
-        add(this.durationField('lobbyDurationSec', 'Lobby length', [['minutes', MIN], ['hours', HOUR], ['days', DAY]])),
+        add(this.durationField('lobbyDurationSec', 'Lobby length', [['min', MIN], ['hours', HOUR], ['days', DAY]])),
       ),
       group('Map', add(this.numberField('gridRadius', 'Map radius')), add(this.numberField('minSpawnDistance', 'Min spawn distance'))),
       group(
@@ -208,20 +264,20 @@ export class SettingsPanel {
       ),
       group(
         'AP schedule',
-        add(this.selectField('tickMode', 'Give AP', [['daily', 'Once a day at a set time'], ['interval', 'At a fixed interval']])),
+        add(this.segmentField('tickMode', 'Give AP', [['daily', 'Once a day'], ['interval', 'Fixed interval']])),
         add(this.textField('tickTime', 'Time of day', { type: 'time' })),
-        add(this.textField('timezone', 'Time zone', { list: 'tz-list', autocomplete: 'off', spellcheck: 'false' })),
-        add(this.durationField('tickIntervalSec', 'Every', [['seconds', 1], ['minutes', MIN], ['hours', HOUR]])),
+        add(this.zoneField('timezone', 'Time zone')),
+        add(this.durationField('tickIntervalSec', 'Every', [['sec', 1], ['min', MIN], ['hours', HOUR]])),
         add(this.numberField('apPerTick', 'AP each time')),
       ),
     );
     const advanced = h(
       'details',
       { class: 'settings-advanced' },
-      h('summary', null, 'Action costs and effects'),
+      h('summary', null, h('span', { class: 'acc-title' }, 'Action costs and effects'), h('span', { class: 'acc-sub' }, 'AP prices, damage, grants and range'), icon('chevron', 'acc-chevron')),
       h(
         'div',
-        { class: 'settings-grid' },
+        { class: 'settings-grid acc-body' },
         group(
           'AP costs',
           add(this.numberField('costMove', 'Move')),
@@ -286,6 +342,8 @@ export class SettingsPanel {
       if (hint) hint.textContent = text;
     };
     setHint('gridRadius', Number.isFinite(radius) && radius > 0 ? `${cellCount(radius)} cells` : '');
+    const { min: rMin, max: rMax } = intRule('gridRadius');
+    this.onRadiusPreview(Number.isInteger(radius) && radius >= rMin && radius <= rMax ? radius : this.rules.gridRadius);
     const range = Number(this.value('startRange'));
     setHint('minSpawnDistance', `0 = automatic (range + 1${Number.isFinite(range) ? ` = ${range + 1}` : ''})`);
     setHint('maxPlayers', `${this.playerCount} joined so far`);
@@ -294,6 +352,7 @@ export class SettingsPanel {
     const dirty = [...this.fields.values()].filter((f) => this.isDirty(f));
     for (const f of this.fields.values()) f.row.classList.toggle('dirty', this.isDirty(f));
     this.saveBtn.disabled = dirty.length === 0;
+    this.body.firstElementChild?.classList.toggle('is-dirty', dirty.length > 0);
     this.discardBtn.hidden = dirty.length === 0;
     this.statusEl.textContent = dirty.length ? `${dirty.length} unsaved ${dirty.length === 1 ? 'change' : 'changes'}` : 'All changes saved';
   }

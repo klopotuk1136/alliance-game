@@ -64,6 +64,9 @@ export function attachWebSocket(server: Server, deps: { auth: Auth; rooms: RoomM
           case 'act':
             c.room.act(c, c.userId, typeof msg.id === 'number' ? msg.id : 0, msg.action);
             break;
+          case 'chat':
+            c.room.chat(c.userId, msg.to, msg.text, msg.sticker);
+            break;
           case 'join':
             c.room.join({ id: c.userId, username: c.username });
             break;

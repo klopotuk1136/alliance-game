@@ -22,6 +22,11 @@ export type ClientMessage =
   /** Room creator only, lobby only: new values for game settings. */
   | { type: 'settings'; changes: Record<string, string | number> }
   | { type: 'act'; id: number; action: GameAction }
+  /**
+   * `to` = a player's pid for a private message, null for the room-wide chat.
+   * With `sticker` (an id from GET /api/stickers) the message is that sticker and `text` is ignored.
+   */
+  | { type: 'chat'; to: number | null; text: string; sticker?: string }
   | { type: 'ping'; t: number };
 
 export interface PublicPlayer {
@@ -35,6 +40,10 @@ export interface PublicPlayer {
   eliminatedBy: number | null;
   eliminatedAt: number | null;
   isCreator: boolean;
+  /** The player's login name; opens their public profile (GET /api/users/<username>/profile). */
+  username?: string;
+  /** URL of the player's profile picture, when they set one. */
+  avatar?: string;
 }
 
 export interface MyStats {
@@ -113,6 +122,23 @@ export interface LogEntry {
   at?: [number, number];
 }
 
+/**
+ * A chat line. Room-wide messages (`to` null) go to every participant; private ones only
+ * to their sender and recipient.
+ */
+export interface ChatMessage {
+  id: number;
+  ts: number;
+  from: number;
+  /** Sender's nickname when the message was sent (they may have left the lobby since). */
+  fromName: string;
+  to: number | null;
+  /** Empty for a sticker message. */
+  text: string;
+  /** Sticker id (see StickerInfo) when the message is a sticker. */
+  sticker?: string;
+}
+
 export interface ActionResult {
   id: number;
   ok: boolean;
@@ -128,6 +154,12 @@ export type ServerMessage =
       resetLog?: boolean;
       result?: ActionResult;
     }
+  | {
+      type: 'chat';
+      messages: ChatMessage[];
+      /** true when `messages` replaces the whole history (initial load / after joining). */
+      reset?: boolean;
+    }
   | { type: 'notice'; message: string; level: 'error' | 'info' }
   | { type: 'fatal'; message: string }
   | { type: 'pong'; t: number; serverNow: number };
@@ -137,6 +169,31 @@ export type ServerMessage =
 export interface UserInfo {
   id: number;
   username: string;
+}
+
+/** What anyone logged in may see of an account (GET /api/users/<username>/profile). */
+export interface PublicProfile {
+  username: string;
+  /** Shown instead of the username where set; the username still logs in. */
+  displayName: string | null;
+  bio: string | null;
+  /** Telegram handle without "@"; link to https://t.me/<handle>. */
+  telegram: string | null;
+  avatarUrl: string | null;
+  joinedAt: number;
+  /** Games started (lobbies that never started don't count) and won. */
+  games: number;
+  wins: number;
+}
+
+/** Your own profile (GET /api/me, PATCH /api/profile, avatar upload/removal). */
+export interface MyProfile extends PublicProfile {
+  updatedAt: number | null;
+}
+
+export interface MeResponse {
+  user: UserInfo;
+  profile: MyProfile;
 }
 
 export interface AuthResponse {
@@ -163,6 +220,30 @@ export interface RoomsResponse {
   serverNow: number;
 }
 
+/** A chat sticker: an image file in the server's stickers/ folder. */
+export interface StickerInfo {
+  /** "<pack folder>/<file>" or "<file>" for the default pack; what a chat message carries. */
+  id: string;
+  /** Shown as alt text: the file name without extension. */
+  name: string;
+  /** Versioned by content, so it can be cached forever. */
+  url: string;
+  w?: number;
+  h?: number;
+}
+
+export interface StickerPack {
+  id: string;
+  title: string;
+  /** URL of the pack's cover sticker. */
+  cover: string;
+  stickers: StickerInfo[];
+}
+
+export interface StickersResponse {
+  packs: StickerPack[];
+}
+
 export interface FlagInfo {
   code: string;
   name: string;
@@ -170,3 +251,4 @@ export interface FlagInfo {
 
 export const NICKNAME_MAX = 20;
 export const ROOM_NAME_MAX = 40;
+export const CHAT_MAX = 500;

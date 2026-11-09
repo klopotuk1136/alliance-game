@@ -19,14 +19,17 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY shared ./shared
 COPY server ./server
+# Chat stickers ship with the image (stickers/README.md); the database volume stays separate.
+COPY stickers ./stickers
 COPY --from=build /app/dist ./dist
 # `alliance <command>` is the admin CLI (talks to the running server over a local socket).
 RUN printf '#!/bin/sh\nexec node /app/server/cli.ts "$@"\n' > /usr/local/bin/alliance \
     && chmod +x /usr/local/bin/alliance \
     && mkdir -p /data && chown node:node /data
 USER node
-VOLUME ["/data"]
+# /data holds the database: mount a volume there (docker-compose.yml does; on Railway,
+# attach a volume at /data). No VOLUME instruction, since Railway refuses Dockerfiles with one.
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD node -e "fetch('http://localhost:8080/api/flags').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://localhost:'+(process.env.PORT||8080)+'/api/flags').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "server/main.ts"]

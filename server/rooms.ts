@@ -34,6 +34,11 @@ export class RoomManager {
     return this.ctx.store;
   }
 
+  /** Pushes fresh views to every room `userId` plays in (after their avatar changed). */
+  refreshUser(userId: number): void {
+    for (const room of this.rooms.values()) if (room.participantOf(userId)) room.refreshViews();
+  }
+
   /** Loads every room from the database and catches up on anything that came due while down. */
   loadAll(): void {
     for (const row of this.ctx.store.loadRooms()) {

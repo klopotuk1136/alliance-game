@@ -3,6 +3,7 @@
 
 import type { ActionResult, ClientMessage, LogEntry, RoomView, ServerMessage, UserInfo } from '../../shared/protocol.ts';
 import { clearToken, getToken } from './api.ts';
+import { ChatPanel } from './chat.ts';
 import { h, replaceChildren, toast } from './dom.ts';
 import { GameView } from './game.ts';
 import { LobbyView } from './lobby.ts';
@@ -14,6 +15,8 @@ export interface RoomCtx {
   send(msg: ClientMessage): void;
   /** Current time on the server's clock. */
   serverNow(): number;
+  /** The room's chat; lives as long as the page, and each screen mounts it in its layout. */
+  chat: ChatPanel;
 }
 
 type View =
@@ -43,6 +46,7 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
       else toast('Not connected yet', 'error');
     },
     serverNow: () => Date.now() + offset,
+    chat: new ChatPanel((to, text, sticker) => ctx.send(sticker ? { type: 'chat', to, text, sticker } : { type: 'chat', to, text })),
   };
 
   function message(text: string): void {
@@ -89,6 +93,7 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
       }
       replaceChildren(host, current.kind === 'outside' ? current.el : current.view.el);
     }
+    ctx.chat.update(state);
     if (current.kind === 'lobby') current.view.update(state);
     else if (current.kind === 'game') current.view.update(state, log, fresh, result);
   }
@@ -106,6 +111,10 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
     }
     if (msg.type === 'notice') {
       toast(msg.message, msg.level === 'error' ? 'error' : 'info', 3000);
+      return;
+    }
+    if (msg.type === 'chat') {
+      ctx.chat.addMessages(msg.messages, msg.reset ?? false);
       return;
     }
     if (msg.type !== 'update') return;

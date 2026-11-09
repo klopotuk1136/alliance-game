@@ -1,4 +1,4 @@
-// The in-game screen: map, own stats, actions (keys 1-4 or buttons), players, log,
+// The in-game screen: map, own stats, actions (keys 1-4 or buttons), chat, players, log,
 // and the winner screen with the full reveal.
 
 import { hexDistance, type Hex } from '../../shared/hex.ts';
@@ -7,8 +7,10 @@ import type { GameSettings } from '../../shared/settings.ts';
 import { flagImg, h, replaceChildren, toast } from './dom.ts';
 import { clockTime, countdown, historyText, logKind, personalText } from './format.ts';
 import { HexMap } from './map.ts';
-import { logout, navigate } from './nav.ts';
+import { navigate } from './nav.ts';
+import { playerNameButton, playerSeal, userMenu } from './profile.ts';
 import type { RoomCtx } from './room.ts';
+import { icon } from './ui.ts';
 
 type ActionKind = 'move' | 'attack' | 'grant' | 'upgrade';
 
@@ -21,11 +23,19 @@ interface ActionDef {
 }
 
 const ACTIONS: ActionDef[] = [
-  { kind: 'move', key: '1', icon: '➜', label: () => 'Move', cost: (r) => r.costMove },
-  { kind: 'attack', key: '2', icon: '⚔', label: (r) => (r.attackDamage > 1 ? `Attack (−${r.attackDamage})` : 'Attack'), cost: (r) => r.costAttack },
-  { kind: 'grant', key: '3', icon: '✚', label: (r) => `Give ${r.grantAmount} AP`, cost: (r) => r.costGrant },
-  { kind: 'upgrade', key: '4', icon: '◎', label: (r) => `Range +${r.upgradeAmount}`, cost: (r) => r.costUpgrade },
+  { kind: 'move', key: '1', icon: 'move', label: () => 'Move', cost: (r) => r.costMove },
+  { kind: 'attack', key: '2', icon: 'attack', label: (r) => (r.attackDamage > 1 ? `Attack (−${r.attackDamage})` : 'Attack'), cost: (r) => r.costAttack },
+  { kind: 'grant', key: '3', icon: 'grant', label: (r) => `Give ${r.grantAmount} AP`, cost: (r) => r.costGrant },
+  { kind: 'upgrade', key: '4', icon: 'range', label: (r) => `Range +${r.upgradeAmount}`, cost: (r) => r.costUpgrade },
 ];
+
+type DockTab = 'chat' | 'players' | 'log';
+type Layout = 'wide' | 'mid' | 'phone';
+
+/** ≥1200: three columns (roster · map · command). 901–1199: map + command with tabs. ≤900: phone flow. */
+const WIDE = window.matchMedia('(min-width: 1200px)');
+const PHONE = window.matchMedia('(max-width: 900px)');
+const layoutNow = (): Layout => (WIDE.matches ? 'wide' : PHONE.matches ? 'phone' : 'mid');
 
 const KEY_TO_ACTION: Record<string, ActionKind> = {
   Digit1: 'move',
@@ -57,10 +67,10 @@ export class GameView {
   private readonly titleEl = h('strong', { class: 'room-name' });
   private readonly phaseEl = h('span', { class: 'badge' });
   private readonly timerEl = h('strong', { class: 'timer-value' }, '--:--');
-  private readonly timerLabel = h('span', { class: 'muted' }, 'Next AP in');
-  private readonly resultsBtn = h('button', { class: 'btn small hidden' }, 'Results');
+  private readonly timerLabel = h('span', { class: 'timer-label' }, 'Next AP in');
+  private readonly resultsBtn = h('button', { class: 'btn small secondary hidden' }, icon('crown'), 'Results');
   private readonly bannerEl = h('div', { class: 'banner hidden' });
-  private readonly meFlag = h('div', { class: 'me-flag' });
+  private readonly meFlag = h('div', { class: 'me-flag seal big' });
   private readonly meName = h('div', { class: 'me-name' });
   private readonly hpEl = h('div', { class: 'stat-value hp' });
   private readonly apEl = h('div', { class: 'stat-value ap' });
@@ -71,6 +81,17 @@ export class GameView {
   private readonly logEl = h('ol', { class: 'log' });
   private readonly overlay = h('div', { class: 'overlay hidden' });
   private readonly onKey = (ev: KeyboardEvent): void => this.handleKey(ev);
+  private readonly roster = h('aside', { class: 'roster', 'aria-label': 'Players and log' });
+  private readonly dock = h('div', { class: 'dock', 'data-tab': 'chat' });
+  private readonly dockPanels = h('div', { class: 'dock-panels' });
+  private readonly dockTabs = new Map<DockTab, HTMLButtonElement>();
+  private readonly playersCard: HTMLElement;
+  private readonly logCard: HTMLElement;
+  private readonly playersCount = h('span', { class: 'count-pill' });
+  private readonly playersTabCount = h('span', { class: 'dock-count' });
+  private dockTab: DockTab = 'chat';
+  private layout: Layout | null = null;
+  private readonly onLayout = (): void => this.applyLayout();
 
   constructor(ctx: RoomCtx) {
     this.ctx = ctx;
@@ -81,8 +102,8 @@ export class GameView {
     for (const a of ACTIONS) {
       const btn = h(
         'button',
-        { class: `action action-${a.kind}`, type: 'button' },
-        h('span', { class: 'action-icon' }, a.icon),
+        { class: `action action-${a.kind}`, type: 'button', 'aria-keyshortcuts': a.key },
+        h('span', { class: 'action-icon' }, icon(a.icon)),
         h('span', { class: 'action-label' }),
         h('span', { class: 'action-cost' }),
         h('kbd', { class: 'kbd' }, a.key),
@@ -94,22 +115,66 @@ export class GameView {
     }
     this.resultsBtn.addEventListener('click', () => this.showWinner());
 
+    this.playersCard = h(
+      'section',
+      { class: 'players-card card', id: 'dock-players', role: 'tabpanel' },
+      h('div', { class: 'card-head' }, h('h2', { class: 'card-title' }, 'Players'), this.playersCount),
+      this.playersEl,
+    );
+    this.logCard = h('section', { class: 'log-card card', id: 'dock-log', role: 'tabpanel' }, h('h2', { class: 'card-title' }, 'Your log'), this.logEl);
+    ctx.chat.el.id = 'dock-chat';
+    ctx.chat.el.setAttribute('role', 'tabpanel');
+    ctx.chat.onIncoming = () => {
+      if (this.layout !== 'wide' && this.dockTab !== 'chat') this.dockTabs.get('chat')?.classList.add('unread');
+    };
+
+    const tabsEl = h('div', { class: 'dock-tabs', role: 'tablist', 'aria-label': 'Side panel' });
+    const tabDefs: Array<[DockTab, string, string]> = [
+      ['chat', 'chat', 'Chat'],
+      ['players', 'users', 'Players'],
+      ['log', 'log', 'Log'],
+    ];
+    for (const [tab, ic, label] of tabDefs) {
+      const b = h(
+        'button',
+        { class: 'dock-tab', type: 'button', role: 'tab', 'aria-controls': `dock-${tab}` },
+        icon(ic),
+        h('span', null, label),
+        tab === 'players' ? this.playersTabCount : null,
+        tab === 'chat' ? h('span', { class: 'dock-dot', 'aria-hidden': 'true' }) : null,
+      );
+      b.addEventListener('click', () => this.setDockTab(tab));
+      b.addEventListener('keydown', (ev) => {
+        const d = ev.key === 'ArrowRight' ? 1 : ev.key === 'ArrowLeft' ? -1 : 0;
+        if (!d) return;
+        ev.preventDefault();
+        const i = tabDefs.findIndex(([t]) => t === tab);
+        const next = tabDefs[(i + d + tabDefs.length) % tabDefs.length][0];
+        this.setDockTab(next);
+        this.dockTabs.get(next)?.focus();
+      });
+      this.dockTabs.set(tab, b);
+      tabsEl.appendChild(b);
+    }
+    this.dock.append(tabsEl, this.dockPanels);
+
     this.el = h(
       'div',
       { class: 'game' },
       h(
         'header',
         { class: 'topbar game-top' },
-        h('button', { class: 'btn ghost small', onclick: () => navigate('/') }, '← Rooms'),
+        h('button', { class: 'btn ghost small back-btn', title: 'Back to rooms', 'aria-label': 'Back to rooms', onclick: () => navigate('/') }, icon('back'), h('span', { class: 'hide-sm' }, 'Rooms')),
         h('div', { class: 'room-title' }, this.titleEl, this.phaseEl),
         h('div', { class: 'spacer' }),
         this.resultsBtn,
-        h('div', { class: 'ap-timer' }, this.timerLabel, this.timerEl),
-        h('button', { class: 'btn ghost small logout', title: 'Log out of this tab', onclick: () => logout() }, 'Log out'),
+        h('div', { class: 'ap-timer' }, icon('clock'), this.timerLabel, this.timerEl),
+        userMenu(ctx.user, true),
       ),
       h(
         'div',
         { class: 'game-body' },
+        this.roster,
         h('div', { class: 'map-col' }, h('div', { class: 'map-wrap' }, this.map.el), this.infoEl),
         h(
           'aside',
@@ -117,31 +182,37 @@ export class GameView {
           this.bannerEl,
           h(
             'section',
-            { class: 'me-card card' },
-            h('div', { class: 'me-head' }, this.meFlag, this.meName),
+            { class: 'me-card card framed' },
+            h('div', { class: 'me-head' }, this.meFlag, h('div', { class: 'me-id' }, h('span', { class: 'eyebrow' }, 'Your country'), this.meName)),
             h(
               'div',
               { class: 'stats' },
-              h('div', { class: 'stat' }, h('div', { class: 'stat-label' }, 'HP'), this.hpEl),
-              h('div', { class: 'stat' }, h('div', { class: 'stat-label' }, 'AP'), this.apEl),
-              h('div', { class: 'stat' }, h('div', { class: 'stat-label' }, 'Range'), this.rangeEl),
+              h('div', { class: 'stat stat-hp' }, h('div', { class: 'stat-label' }, 'HP'), this.hpEl),
+              h('div', { class: 'stat stat-ap' }, h('div', { class: 'stat-label' }, 'AP'), this.apEl),
+              h('div', { class: 'stat stat-range' }, h('div', { class: 'stat-label' }, 'Range'), this.rangeEl),
             ),
           ),
           h('section', { class: 'actions-card card' }, actionsEl, h('p', { class: 'hint kbd-hint' }, 'Point at a cell and press 1–4. No confirmation: actions fire instantly.')),
-          h('section', { class: 'players-card card' }, h('h3', null, 'Players'), this.playersEl),
-          h('section', { class: 'log-card card' }, h('h3', null, 'Your log'), this.logEl),
+          this.dock,
         ),
       ),
       this.overlay,
     );
+    this.applyLayout();
+    this.setDockTab('chat');
+    WIDE.addEventListener('change', this.onLayout);
+    PHONE.addEventListener('change', this.onLayout);
 
     window.addEventListener('keydown', this.onKey);
     this.timer = window.setInterval(() => this.renderTimer(), 250);
   }
 
   destroy(): void {
+    WIDE.removeEventListener('change', this.onLayout);
+    PHONE.removeEventListener('change', this.onLayout);
     window.removeEventListener('keydown', this.onKey);
     clearInterval(this.timer);
+    this.map.destroy();
   }
 
   update(state: RoomView, log: LogEntry[], fresh: LogEntry[], result?: ActionResult): void {
@@ -163,6 +234,34 @@ export class GameView {
   /** Called for results that arrive without a state change (failed actions). */
   result(result: ActionResult): void {
     this.handleResult(result);
+  }
+
+  // ---------------------------------------------------------------- layout
+
+  /** Moves the players and log cards between the left roster (wide) and the tabbed dock. */
+  private applyLayout(): void {
+    const layout = layoutNow();
+    if (layout === this.layout) return;
+    this.layout = layout;
+    this.el.dataset.layout = layout;
+    if (layout === 'wide') {
+      this.roster.append(this.playersCard, this.logCard);
+      this.dockPanels.append(this.ctx.chat.el);
+    } else {
+      this.dockPanels.append(this.ctx.chat.el, this.playersCard, this.logCard);
+    }
+    this.setDockTab(this.dockTab);
+  }
+
+  private setDockTab(tab: DockTab): void {
+    this.dockTab = tab;
+    this.dock.dataset.tab = tab;
+    for (const [t, b] of this.dockTabs) {
+      b.classList.toggle('active', t === tab);
+      b.setAttribute('aria-selected', String(t === tab));
+      b.tabIndex = t === tab ? 0 : -1;
+      if (t === tab && t === 'chat') b.classList.remove('unread');
+    }
   }
 
   // ---------------------------------------------------------------- helpers
@@ -340,14 +439,15 @@ export class GameView {
     let banner: HTMLElement | null = null;
     if (st.phase === 'finished') {
       const w = this.player(st.winnerPid ?? undefined);
-      banner = h('div', null, w ? (w.pid === me?.pid ? 'You won the game! 🏆' : `Game over: ${w.nickname} won.`) : 'Game over.');
+      banner = h('div', { class: 'banner-row' }, icon('crown'), h('span', null, w ? (w.pid === me?.pid ? 'You won the game!' : `Game over: ${w.nickname} won.`) : 'Game over.'));
     } else if (me && !me.alive) {
       const by = mePub?.eliminatedBy ?? null;
-      banner = h('div', null, `You were eliminated${by !== null ? ` by ${this.name(by)}` : ''}. You can keep watching.`);
+      banner = h('div', { class: 'banner-row' }, icon('alert'), h('span', null, `You were eliminated${by !== null ? ` by ${this.name(by)}` : ''}. You can keep watching.`));
     } else if (st.phase === 'paused') {
-      banner = h('div', null, 'The game is paused by the admin.');
+      banner = h('div', { class: 'banner-row' }, icon('pause'), h('span', null, 'The game is paused by the admin.'));
     }
     this.bannerEl.classList.toggle('hidden', !banner);
+    this.bannerEl.dataset.kind = st.phase === 'finished' ? 'finished' : me && !me.alive ? 'dead' : 'paused';
     if (banner) replaceChildren(this.bannerEl, banner);
 
     // Me
@@ -359,7 +459,11 @@ export class GameView {
       const hp = me.hp;
       replaceChildren(
         this.hpEl,
-        hp <= 8 ? h('span', { class: 'hearts' }, '♥'.repeat(hp) || '–') : h('span', null, `♥ ${hp}`),
+        hp <= 0
+          ? h('span', { class: 'hp-num' }, '0')
+          : hp <= 6
+            ? h('span', { class: 'hearts', 'aria-label': `${hp} HP` }, Array.from({ length: hp }, () => icon('heart', 'heart')))
+            : h('span', { class: 'hp-num' }, icon('heart', 'heart'), String(hp)),
       );
       this.apEl.textContent = String(me.ap);
       this.rangeEl.textContent = String(me.range);
@@ -376,6 +480,9 @@ export class GameView {
     }
 
     // Players
+    const alive = st.players.filter((p) => p.alive).length;
+    this.playersCount.textContent = `${alive}/${st.players.length} alive`;
+    this.playersTabCount.textContent = String(alive);
     const sorted = [...st.players].sort((a, b) => Number(b.alive) - Number(a.alive) || a.nickname.localeCompare(b.nickname));
     replaceChildren(
       this.playersEl,
@@ -389,10 +496,10 @@ export class GameView {
         else detail = dist !== null ? `${dist} away` : '';
         return h(
           'li',
-          { class: `player ${p.alive ? '' : 'out'} ${p.pid === me?.pid ? 'is-me' : ''}` },
-          flagImg(p.flag),
-          h('span', { class: 'player-name' }, p.nickname),
-          inRange ? h('span', { class: 'in-range-dot', title: 'In your range' }, '◉') : null,
+          { class: `player ${p.alive ? '' : 'out'} ${p.pid === me?.pid ? 'is-me' : ''} ${inRange ? 'in-range' : ''}` },
+          playerSeal(p, this.ctx.user),
+          playerNameButton(p, this.ctx.user),
+          inRange ? h('span', { class: 'tag range', title: 'In your attack range' }, 'in range') : null,
           h('span', { class: 'player-detail' }, detail),
         );
       }),
@@ -406,10 +513,10 @@ export class GameView {
         ? recent.map((e) =>
             h('li', { class: `log-entry ${logKind(e)}` }, h('time', null, clockTime(e.ts)), h('span', null, personalText(e, this.name, me?.pid ?? null))),
           )
-        : h('li', { class: 'empty' }, 'Nothing yet.'),
+        : h('li', { class: 'empty' }, 'Nothing has happened to you yet.'),
     );
 
-    this.map.render({ players: st.players, myPid: me?.pid ?? null, myPos, range: me?.range ?? 0, showRange: canAct });
+    this.map.render({ players: st.players, myPid: me?.pid ?? null, myPos, range: me?.range ?? 0, showRange: canAct, myHp: me?.hp ?? null });
     this.renderInfo();
     this.renderTimer();
   }
@@ -437,24 +544,31 @@ export class GameView {
     if (!cell) {
       replaceChildren(
         this.infoEl,
-        h('span', { class: 'muted' }, isTouch() ? 'Tap a cell, then pick an action below.' : 'Point at a cell, then press 1 move · 2 attack · 3 give AP · 4 upgrade range.'),
+        icon('hex', 'info-hex'),
+        h(
+          'span',
+          { class: 'muted' },
+          isTouch()
+            ? 'Tap a cell, then pick an action below.'
+            : ['Point at a cell, then press ', h('kbd', null, '1'), ' move · ', h('kbd', null, '2'), ' attack · ', h('kbd', null, '3'), ' give AP · ', h('kbd', null, '4'), ' upgrade range'],
+        ),
       );
       return;
     }
     const dist = myPos ? hexDistance(myPos, cell) : null;
     const occupant = this.playerAt(cell);
-    const parts: Array<HTMLElement | string> = [];
+    const parts: Array<Node | string> = [];
     if (occupant) {
-      parts.push(flagImg(occupant.flag), h('strong', null, occupant.nickname));
+      parts.push(h('span', { class: 'seal' }, flagImg(occupant.flag)), h('strong', null, occupant.nickname));
       if (occupant.pid === st.me?.pid) parts.push(h('span', { class: 'muted' }, '(you)'));
       else if (dist !== null && st.me) {
         parts.push(dist <= st.me.range ? h('span', { class: 'tag good' }, 'in range') : h('span', { class: 'tag' }, 'out of range'));
       }
     } else {
-      parts.push(h('span', { class: 'muted' }, 'Empty cell'));
+      parts.push(icon('hex', 'info-hex'), h('span', { class: 'muted' }, 'Empty cell'));
       if (dist === 1 && this.canAct()) parts.push(h('span', { class: 'tag good' }, 'you can move here'));
     }
-    if (dist !== null && dist > 0) parts.push(h('span', { class: 'muted' }, `${dist} ${dist === 1 ? 'cell' : 'cells'} away`));
+    if (dist !== null && dist > 0) parts.push(h('span', { class: 'cell-dist' }, `${dist} ${dist === 1 ? 'cell' : 'cells'} away`));
     replaceChildren(this.infoEl, ...parts);
   }
 
@@ -480,7 +594,7 @@ export class GameView {
             return h(
               'tr',
               { class: r.pid === st.winnerPid ? 'winner-row' : '' },
-              h('td', { class: 'who' }, p ? flagImg(p.flag) : null, p?.nickname ?? '?'),
+              h('td', { class: 'who' }, h('span', { class: 'who-inner' }, p ? flagImg(p.flag) : null, p?.nickname ?? '?')),
               h('td', null, String(r.hp)),
               h('td', null, String(r.ap)),
               h('td', null, String(r.range)),
@@ -501,13 +615,15 @@ export class GameView {
       h(
         'div',
         { class: 'card winner-card', role: 'dialog', 'aria-modal': 'true' },
-        h('div', { class: 'trophy' }, '🏆'),
+        h('p', { class: 'eyebrow center' }, st.name),
+        winner ? h('div', { class: 'winner-seal' }, h('span', { class: 'winner-hex' }, flagImg(winner.flag, 'flag big', '1x1')), icon('crown', 'winner-crown')) : null,
         winner
-          ? h('h2', { class: 'winner-title' }, flagImg(winner.flag, 'flag big'), winner.pid === st.me?.pid ? 'You won!' : `${winner.nickname} wins!`)
-          : h('h2', null, 'Game over'),
+          ? h('h2', { class: 'winner-title display' }, winner.pid === st.me?.pid ? 'You won!' : `${winner.nickname} wins!`)
+          : h('h2', { class: 'winner-title display' }, 'Game over'),
+        winner ? h('p', { class: 'winner-sub' }, 'Last country standing.') : null,
         reveal
           ? [
-              h('h3', null, 'Final stats'),
+              h('h3', { class: 'section-title' }, 'Final stats'),
               h(
                 'div',
                 { class: 'table-wrap' },
@@ -526,7 +642,7 @@ export class GameView {
                   h('tbody', null, rows),
                 ),
               ),
-              h('h3', null, 'What really happened'),
+              h('h3', { class: 'section-title' }, 'What really happened'),
               h(
                 'ol',
                 { class: 'history' },

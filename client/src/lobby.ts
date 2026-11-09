@@ -7,9 +7,13 @@ import { NICKNAME_MAX } from '../../shared/protocol.ts';
 import { fetchFlags } from './api.ts';
 import { flagImg, h, replaceChildren, toast } from './dom.ts';
 import { countdown } from './format.ts';
-import { logout, navigate } from './nav.ts';
+import { HexMap } from './map.ts';
+import { navigate } from './nav.ts';
+import { playerNameButton, playerSeal, userMenu } from './profile.ts';
 import type { RoomCtx } from './room.ts';
 import { SettingsPanel } from './settings-panel.ts';
+import { icon, logo, searchField } from './ui.ts';
+import { cellCount } from '../../shared/hex.ts';
 
 export class LobbyView {
   readonly el: HTMLElement;
@@ -20,27 +24,34 @@ export class LobbyView {
   private readonly timer: number;
   private confirmingStart = false;
 
-  private readonly titleEl = h('h1', { class: 'lobby-title' });
+  private readonly titleEl = h('h1', { class: 'lobby-title display' });
   private readonly statusEl = h('p', { class: 'lobby-status' });
-  private readonly countEl = h('span', { class: 'muted' });
-  private readonly shareInput = h('input', { class: 'share-input', readonly: true });
+  private readonly countEl = h('span', { class: 'count-pill' });
+  private readonly shareInput = h('input', { class: 'share-input', readonly: true, 'aria-label': 'Invite link' });
   private readonly controlsEl = h('div', { class: 'lobby-controls' });
   private readonly playersEl = h('ul', { class: 'lobby-players' });
   private readonly sideEl = h('div', { class: 'lobby-side' });
-  private readonly nickInput = h('input', { maxlength: NICKNAME_MAX, placeholder: 'Your nickname', autocomplete: 'off' });
-  private readonly flagSearch = h('input', { type: 'search', placeholder: 'Search countries…', autocomplete: 'off' });
-  private readonly flagGrid = h('div', { class: 'flag-grid' }, h('p', { class: 'muted' }, 'Loading flags…'));
+  private readonly nickInput = h('input', { id: 'nick-input', maxlength: NICKNAME_MAX, placeholder: 'Your nickname', autocomplete: 'off' });
+  private readonly flagSearchField = searchField('Search countries…', 'Search flags');
+  private readonly flagSearch = this.flagSearchField.input;
+  private readonly flagGrid = h('div', { class: 'flag-grid', role: 'group', 'aria-label': 'Flags' }, h('p', { class: 'muted' }, 'Loading flags…'));
+  private readonly flagEmpty = h('p', { class: 'flag-empty', hidden: true }, 'No country matches that search.');
   private readonly myFlagEl = h('div', { class: 'my-flag' });
   private readonly profileCard: HTMLElement;
   private readonly joinCard: HTMLElement;
   private readonly settings: SettingsPanel;
   private rulesKey = '';
+  /** Live 3D preview of the board: grows/shrinks with Map radius, players stand around it. */
+  private readonly preview = new HexMap({ preview: true });
+  private readonly previewTitle = h('strong', null, 'The map');
+  private previewRadius = -1;
 
   constructor(ctx: RoomCtx) {
     this.ctx = ctx;
     this.settings = new SettingsPanel((changes) => this.ctx.send({ type: 'settings', changes }));
+    this.settings.onRadiusPreview = (r) => this.setPreviewRadius(r);
     this.shareInput.value = `${location.origin}/r/${ctx.code}`;
-    const copyBtn = h('button', { class: 'btn small', type: 'button' }, 'Copy link');
+    const copyBtn = h('button', { class: 'btn secondary', type: 'button' }, icon('copy'), 'Copy link');
     copyBtn.addEventListener('click', () => this.copyLink());
 
     const saveNick = (): void => {
@@ -48,7 +59,7 @@ export class LobbyView {
       const mine = this.myPlayer();
       if (mine && value && value !== mine.nickname) this.ctx.send({ type: 'profile', nickname: value });
     };
-    const nickForm = h('form', { class: 'nick-form' }, this.nickInput, h('button', { class: 'btn small', type: 'submit' }, 'Save'));
+    const nickForm = h('form', { class: 'nick-form' }, this.nickInput, h('button', { class: 'btn secondary', type: 'submit' }, 'Save'));
     nickForm.addEventListener('submit', (ev) => {
       ev.preventDefault();
       saveNick();
@@ -58,16 +69,16 @@ export class LobbyView {
 
     this.profileCard = h(
       'section',
-      { class: 'card' },
-      h('h2', null, 'Your country'),
-      h('label', { class: 'field-label' }, 'Nickname'),
+      { class: 'card framed profile-card' },
+      h('h2', { class: 'card-title' }, 'Your country'),
+      h('label', { class: 'field-label', for: 'nick-input' }, 'Nickname'),
       nickForm,
-      h('label', { class: 'field-label' }, 'Flag'),
+      h('span', { class: 'field-label' }, 'Flag'),
       this.myFlagEl,
-      this.flagSearch,
-      this.flagGrid,
+      this.flagSearchField.el,
+      h('div', { class: 'flag-scroll' }, this.flagGrid, this.flagEmpty),
     );
-    this.joinCard = h('section', { class: 'card join-card' });
+    this.joinCard = h('section', { class: 'card framed join-card' });
 
     this.el = h(
       'div',
@@ -75,27 +86,45 @@ export class LobbyView {
       h(
         'header',
         { class: 'topbar' },
-        h('button', { class: 'btn ghost small', onclick: () => navigate('/') }, '← Rooms'),
-        h('div', { class: 'logo small' }, h('span', { class: 'logo-mark' }, '⬢'), 'Alliance'),
+        h('button', { class: 'btn ghost small back-btn', onclick: () => navigate('/') }, icon('back'), 'Rooms'),
+        h('div', { class: 'topbar-divider', 'aria-hidden': 'true' }),
+        logo(true),
         h('div', { class: 'spacer' }),
-        h('span', { class: 'muted' }, ctx.user.username),
-        h('button', { class: 'btn ghost small', onclick: () => logout() }, 'Log out'),
+        userMenu(ctx.user),
       ),
       h(
         'main',
         { class: 'lobby-page' },
         h(
           'section',
-          { class: 'card lobby-head' },
-          h('div', { class: 'lobby-head-row' }, this.titleEl, h('span', { class: 'badge lobby' }, 'Lobby')),
+          { class: 'card framed lobby-head' },
+          h('p', { class: 'eyebrow' }, h('span', { class: 'badge lobby' }, 'Lobby'), `Room ${ctx.code.toUpperCase()}`),
+          this.titleEl,
           this.statusEl,
-          h('div', { class: 'share-row' }, this.shareInput, copyBtn),
+          h('div', { class: 'share-row' }, h('div', { class: 'share-field' }, icon('link'), this.shareInput), copyBtn),
           this.controlsEl,
+        ),
+        h(
+          'section',
+          { class: 'card framed lobby-map', 'aria-label': 'Map preview' },
+          h(
+            'div',
+            { class: 'lobby-map-caption' },
+            h('span', { class: 'eyebrow' }, 'Map preview'),
+            this.previewTitle,
+            h('span', { class: 'muted' }, 'Players take their places when the game starts'),
+          ),
+          this.preview.el,
         ),
         h(
           'div',
           { class: 'lobby-grid' },
-          h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Players'), this.countEl), this.playersEl),
+          h(
+            'div',
+            { class: 'lobby-main' },
+            h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', { class: 'card-title' }, 'Players'), this.countEl), this.playersEl),
+            ctx.chat.el,
+          ),
           this.sideEl,
         ),
         this.settings.el,
@@ -115,6 +144,14 @@ export class LobbyView {
 
   destroy(): void {
     clearInterval(this.timer);
+    this.preview.destroy();
+  }
+
+  private setPreviewRadius(r: number): void {
+    if (r === this.previewRadius) return;
+    this.previewRadius = r;
+    this.preview.setRadius(r);
+    this.previewTitle.textContent = `Radius ${r} · ${cellCount(r)} cells`;
   }
 
   update(state: RoomView): void {
@@ -126,6 +163,7 @@ export class LobbyView {
     this.state = state;
     this.render();
     this.settings.update(state.rules, state.isCreator, state.players.length);
+    this.preview.roster(state.players, state.me?.pid ?? null);
   }
 
   private myPlayer() {
@@ -146,7 +184,7 @@ export class LobbyView {
   private buildFlagGrid(): void {
     this.flagButtons.clear();
     const buttons = this.flags.map((f) => {
-      const btn = h('button', { class: 'flag-btn', type: 'button', title: f.name, 'data-code': f.code }, flagImg(f.code));
+      const btn = h('button', { class: 'flag-btn', type: 'button', title: f.name, 'aria-label': f.name, 'aria-pressed': 'false', 'data-code': f.code }, flagImg(f.code));
       btn.addEventListener('click', () => {
         if (btn.classList.contains('taken')) return;
         this.ctx.send({ type: 'profile', flag: f.code });
@@ -160,10 +198,14 @@ export class LobbyView {
 
   private filterFlags(): void {
     const q = this.flagSearch.value.trim().toLowerCase();
+    let shown = 0;
     for (const f of this.flags) {
       const btn = this.flagButtons.get(f.code);
-      if (btn) btn.hidden = q !== '' && !f.name.toLowerCase().includes(q) && f.code !== q;
+      if (!btn) continue;
+      btn.hidden = q !== '' && !f.name.toLowerCase().includes(q) && f.code !== q;
+      if (!btn.hidden) shown++;
     }
+    this.flagEmpty.hidden = shown > 0 || this.flags.length === 0;
   }
 
   private renderStatus(): void {
@@ -172,12 +214,33 @@ export class LobbyView {
     const creator = st.players.find((p) => p.isCreator);
     if (st.lobbyEndsAt !== null) {
       const left = st.lobbyEndsAt - this.ctx.serverNow();
-      this.statusEl.textContent =
-        left > 0 ? `The game starts automatically in ${countdown(left)}${st.isCreator ? ', or when you start it.' : `, or when ${creator?.nickname ?? 'the creator'} starts it.`}` : 'Starting…';
+      if (left > 0) {
+        replaceChildren(
+          this.statusEl,
+          icon('clock'),
+          h(
+            'span',
+            null,
+            'The game starts automatically in ',
+            h('strong', { class: 'countdown' }, countdown(left)),
+            st.isCreator ? ', or when you start it.' : `, or when ${creator?.nickname ?? 'the creator'} starts it.`,
+          ),
+        );
+      } else {
+        replaceChildren(this.statusEl, icon('clock'), h('span', null, 'Starting…'));
+      }
     } else {
-      this.statusEl.textContent = st.isCreator
-        ? 'The lobby time is over. Start the game once at least 2 players have joined.'
-        : `The lobby time is over. Waiting for ${creator?.nickname ?? 'the creator'} to start the game.`;
+      replaceChildren(
+        this.statusEl,
+        icon('clock'),
+        h(
+          'span',
+          null,
+          st.isCreator
+            ? 'The lobby time is over. Start the game once at least 2 players have joined.'
+            : `The lobby time is over. Waiting for ${creator?.nickname ?? 'the creator'} to start the game.`,
+        ),
+      );
     }
   }
 
@@ -192,6 +255,7 @@ export class LobbyView {
     const controls: HTMLElement[] = [];
     if (st.isCreator) {
       const start = h('button', { class: 'btn primary', type: 'button' }, 'Start the game now');
+      if (st.players.length < 2) controls.push(h('span', { class: 'controls-note' }, 'Waiting for at least one more player'));
       start.disabled = st.players.length < 2;
       start.title = start.disabled ? 'At least 2 players are needed' : '';
       if (this.confirmingStart) {
@@ -213,9 +277,9 @@ export class LobbyView {
           if (this.state.phase === 'lobby') this.render();
         }, 4000);
       });
-      controls.push(start);
+      controls.unshift(start);
     } else if (st.participant) {
-      const leave = h('button', { class: 'btn ghost', type: 'button' }, 'Leave room');
+      const leave = h('button', { class: 'btn secondary', type: 'button' }, 'Leave room');
       leave.addEventListener('click', () => this.ctx.send({ type: 'leave' }));
       controls.push(leave);
     }
@@ -227,14 +291,14 @@ export class LobbyView {
       st.players.map((p) => {
         const kick =
           st.isCreator && !p.isCreator
-            ? h('button', { class: 'btn ghost small kick', type: 'button', title: `Remove ${p.nickname}`, onclick: () => this.ctx.send({ type: 'kick', pid: p.pid }) }, 'Remove')
+            ? h('button', { class: 'btn ghost small kick', type: 'button', title: `Remove ${p.nickname}`, 'aria-label': `Remove ${p.nickname}`, onclick: () => this.ctx.send({ type: 'kick', pid: p.pid }) }, icon('close'), h('span', { class: 'hide-xs' }, 'Remove'))
             : null;
         return h(
           'li',
           { class: p.pid === mine?.pid ? 'is-me' : '' },
-          flagImg(p.flag),
-          h('span', { class: 'player-name' }, p.nickname),
-          p.isCreator ? h('span', { class: 'tag' }, 'creator') : null,
+          playerSeal(p, this.ctx.user),
+          playerNameButton(p, this.ctx.user),
+          p.isCreator ? h('span', { class: 'tag brass' }, icon('crown'), 'creator') : null,
           p.pid === mine?.pid ? h('span', { class: 'tag good' }, 'you') : null,
           h('span', { class: 'spacer' }),
           kick,
@@ -247,13 +311,20 @@ export class LobbyView {
       if (this.sideEl.firstChild !== this.profileCard) replaceChildren(this.sideEl, this.profileCard);
       if (document.activeElement !== this.nickInput) this.nickInput.value = mine.nickname;
       const flagName = this.flags.find((f) => f.code === mine.flag)?.name ?? mine.flag;
-      replaceChildren(this.myFlagEl, flagImg(mine.flag, 'flag big'), h('span', null, flagName));
+      replaceChildren(
+        this.myFlagEl,
+        h('span', { class: 'seal big' }, flagImg(mine.flag, 'flag big')),
+        h('span', { class: 'my-flag-text' }, h('strong', null, flagName), h('span', { class: 'muted small' }, 'Your banner on the map')),
+      );
       const owners = new Map(st.players.map((p) => [p.flag, p]));
       for (const [code, btn] of this.flagButtons) {
         const owner = owners.get(code);
         const name = this.flags.find((f) => f.code === code)?.name ?? code;
         btn.classList.toggle('mine', owner?.pid === mine.pid);
         btn.classList.toggle('taken', !!owner && owner.pid !== mine.pid);
+        btn.setAttribute('aria-pressed', String(owner?.pid === mine.pid));
+        if (owner && owner.pid !== mine.pid) btn.setAttribute('aria-disabled', 'true');
+        else btn.removeAttribute('aria-disabled');
         btn.title = owner && owner.pid !== mine.pid ? `${name}: taken by ${owner.nickname}` : name;
       }
     } else {
@@ -263,7 +334,7 @@ export class LobbyView {
       join.addEventListener('click', () => this.ctx.send({ type: 'join' }));
       replaceChildren(
         this.joinCard,
-        h('h2', null, 'Want to play?'),
+        h('h2', { class: 'card-title' }, 'Want to play?'),
         h('p', { class: 'muted' }, 'Join to pick your nickname and flag. You can leave any time before the game starts.'),
         join,
       );

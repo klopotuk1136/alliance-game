@@ -26,6 +26,7 @@ Overview
   rooms                                List all rooms
   room <code>                          Full room state, including hidden stats
   log <code> [count]                   Full event history of a room (default last 50)
+  chat <code> [count]                  Chat of a room, private messages included (default last 50)
 
 Users
   users                                List accounts
@@ -233,6 +234,20 @@ export async function runAdminCommand(deps: AdminDeps, argv: string[]): Promise<
         .slice(-count)
         .map((e) => historyLine(room, e, now));
       return lines.length ? lines.join('\n') : 'No events yet.';
+    }
+
+    case 'chat': {
+      need(args, 1, 'chat <code> [count]');
+      const room = rooms.require(args[0]);
+      const count = args[1] ? Math.max(1, Number(args[1]) || 50) : 50;
+      const now = deps.now();
+      const lines = store.chatAll(room.row.id, count).map((m) => {
+        const t = fmtTime(m.ts, room.settings.timezone, now).split(' (')[0];
+        const from = room.players.get(m.from)?.nickname ?? m.fromName;
+        const to = m.to === null ? 'all' : nameOf(room, m.to);
+        return `${t}  ${from} -> ${to}: ${m.sticker ? `[sticker ${m.sticker}]` : m.text.replace(/\n/g, ' / ')}`;
+      });
+      return lines.length ? lines.join('\n') : 'No messages yet.';
     }
 
     case 'users': {

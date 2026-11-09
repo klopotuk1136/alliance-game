@@ -1,0 +1,12 @@
+# Not uploaded by `railway up`.
+node_modules/
+dist/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+# Stickers over the 2 MB limit (the server skips them anyway).
+stickers/BazoviyNabor4eg/neuro-sama-evil-neuro.gif
+stickers/BazoviyNabor4eg/party-in-provincetown.gif
+stickers/BazoviyNabor4eg/женушка-меня-соблазняет-two.gif

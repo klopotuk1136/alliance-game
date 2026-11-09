@@ -1,7 +1,7 @@
 // Server startup options. Every option has a command-line flag and most have an
 // environment variable, so Docker and local runs can be configured the same way.
 
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 export function defaultAdminSocket(): string {
   if (process.env.ALLIANCE_ADMIN_SOCKET) return process.env.ALLIANCE_ADMIN_SOCKET;
@@ -14,7 +14,12 @@ export interface ServerOptions {
   db: string;
   adminSocket: string;
   staticDir: string;
+  /** Folder of chat sticker images (see stickers/README.md). */
+  stickersDir: string;
+  /** Uploaded profile pictures; defaults to avatars/ next to the database (the data volume). */
+  avatarsDir: string;
   testMode: boolean;
+  trustProxy: boolean;
   /** Overrides for the default settings of new rooms (`--set key=value`). */
   overrides: Record<string, string>;
   help: boolean;
@@ -30,7 +35,12 @@ Options:
   --db <path>           SQLite database file (env ALLIANCE_DB, default ./data/alliance.db)
   --admin-socket <path> Socket the admin CLI talks to (env ALLIANCE_ADMIN_SOCKET)
   --static <dir>        Built browser client (default ./dist/client)
+  --stickers <dir>      Chat sticker images (env ALLIANCE_STICKERS, default ./stickers)
+  --avatars <dir>       Uploaded profile pictures (env ALLIANCE_AVATARS,
+                        default: an avatars folder next to the database)
   --test-mode           New rooms tick AP every 30 s and their lobby lasts 10 min
+  --trust-proxy         Behind a reverse proxy: rate-limit by X-Real-IP / X-Forwarded-For
+                        (env TRUST_PROXY=1; automatic on Railway)
   --set key=value       Default setting for new rooms; repeatable
                         (e.g. --set tickIntervalSec=10 --set startHp=5)
   --help                Show this help
@@ -45,7 +55,11 @@ export function parseServerArgs(argv: string[]): ServerOptions {
     db: process.env.ALLIANCE_DB ?? './data/alliance.db',
     adminSocket: defaultAdminSocket(),
     staticDir: './dist/client',
+    stickersDir: process.env.ALLIANCE_STICKERS ?? './stickers',
+    avatarsDir: process.env.ALLIANCE_AVATARS ?? '',
     testMode: process.env.ALLIANCE_TEST_MODE === '1',
+    // Railway always runs the app behind its proxy (RAILWAY_ENVIRONMENT_ID is set there).
+    trustProxy: process.env.TRUST_PROXY === '1' || process.env.RAILWAY_ENVIRONMENT_ID !== undefined,
     overrides: {},
     help: false,
   };
@@ -72,8 +86,17 @@ export function parseServerArgs(argv: string[]): ServerOptions {
       case '--static':
         opts.staticDir = value();
         break;
+      case '--stickers':
+        opts.stickersDir = value();
+        break;
+      case '--avatars':
+        opts.avatarsDir = value();
+        break;
       case '--test-mode':
         opts.testMode = true;
+        break;
+      case '--trust-proxy':
+        opts.trustProxy = true;
         break;
       case '--set': {
         const v = value();
@@ -92,5 +115,7 @@ export function parseServerArgs(argv: string[]): ServerOptions {
   }
   if (!Number.isInteger(opts.port) || opts.port <= 0 || opts.port > 65535) throw new Error('Invalid --port');
   opts.staticDir = resolve(opts.staticDir);
+  opts.stickersDir = resolve(opts.stickersDir);
+  opts.avatarsDir = resolve(opts.avatarsDir || join(opts.db === ':memory:' ? '.' : dirname(opts.db), 'avatars'));
   return opts;
 }

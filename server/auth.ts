@@ -43,6 +43,10 @@ export function validatePassword(password: unknown): string | null {
   return null;
 }
 
+/** A session that goes unused this long is expired; using it pushes the expiry forward. */
+export const SESSION_IDLE_MS = 90 * 24 * 60 * 60 * 1000;
+const SESSION_REFRESH_MS = 24 * 60 * 60 * 1000;
+
 export class AuthError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) {
@@ -58,6 +62,7 @@ export class Auth {
   constructor(store: Store, now: () => number) {
     this.store = store;
     this.now = now;
+    store.deleteSessionsBefore(now() - SESSION_IDLE_MS);
   }
 
   async createUser(username: unknown, password: unknown): Promise<UserRow> {
@@ -95,7 +100,14 @@ export class Auth {
 
   userByToken(token: unknown): UserRow | undefined {
     if (typeof token !== 'string' || token.length < 10 || token.length > 200) return undefined;
-    return this.store.userBySession(hashToken(token));
+    const now = this.now();
+    const hash = hashToken(token);
+    const row = this.store.userBySession(hash, now - SESSION_IDLE_MS);
+    if (!row) return undefined;
+    // Refresh at most once a day, so lookups don't turn into a write each time.
+    if (now - row.session_at > SESSION_REFRESH_MS) this.store.touchSession(hash, now);
+    const { session_at: _, ...user } = row;
+    return user;
   }
 
   async setPassword(username: string, password: string): Promise<void> {

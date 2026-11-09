@@ -143,6 +143,17 @@ test('paused games reject actions and skip ticks; resume reschedules', () => {
   assert.equal(room.participantOf(alice.id)!.ap, 0);
 });
 
+test('eliminating the second-to-last player while paused finishes the game', () => {
+  const { room, alice, bob } = setup();
+  room.join(bob);
+  room.requestStart(alice.id);
+  room.pause();
+  room.adjustPlayer(room.participantOf(bob.id)!.pid, { hp: 0 });
+  assert.equal(room.phase, 'finished');
+  assert.equal(room.row.winner_pid, room.participantOf(alice.id)!.pid);
+  assert.throws(() => room.resume(), RoomError);
+});
+
 test('missed daily ticks are granted after downtime; missed interval ticks are not', () => {
   const daily = setup();
   daily.room.join(daily.bob);

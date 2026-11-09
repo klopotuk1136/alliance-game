@@ -1,7 +1,7 @@
 // One game room: lobby, game state, timers and the connected browsers. All changes go
 // through `commit`, which writes them to SQLite and then pushes per-player updates.
 
-import { NICKNAME_MAX, type ActionResult, type GameAction, type ServerMessage } from '../shared/protocol.ts';
+import { CHAT_MAX, NICKNAME_MAX, type ActionResult, type ChatMessage, type GameAction, type ServerMessage } from '../shared/protocol.ts';
 import { applySettingOverrides, effectiveSpawnDistance, normalizeSettings, type GameSettings } from '../shared/settings.ts';
 import type { RoomRow, Store, StoredEvent } from './db.ts';
 import {
@@ -34,6 +34,8 @@ export interface RoomContext {
   rng: () => number;
   flagCodes: Set<string>;
   log: (msg: string) => void;
+  /** Known chat stickers (server/stickers.ts); without it sticker messages are refused. */
+  stickers?: { has(id: string): boolean };
 }
 
 /** An error whose message is safe and meant to be shown to the user. */
@@ -43,6 +45,11 @@ const SCHEDULE_KEYS = ['tickMode', 'tickTime', 'timezone', 'tickIntervalSec'];
 /** Settings that decide whether everyone fits on the map at the start. */
 const FIT_KEYS = ['gridRadius', 'maxPlayers', 'startRange', 'minSpawnDistance'];
 const MAX_TIMER_MS = 2 ** 31 - 1;
+/** How many past chat messages a browser gets when it connects. */
+const CHAT_HISTORY = 300;
+/** Chat flood limit per user: at most CHAT_BURST messages per CHAT_WINDOW_MS. */
+const CHAT_BURST = 8;
+const CHAT_WINDOW_MS = 10_000;
 
 function stateKey(state: unknown): string {
   return JSON.stringify({ ...(state as object), serverNow: 0 });
@@ -60,6 +67,21 @@ export function cleanNickname(raw: unknown): string {
   return s;
 }
 
+export function cleanChatText(raw: unknown): string {
+  if (typeof raw !== 'string') throw new RoomError('Message is empty');
+  const s = raw
+    .normalize('NFC')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, ' ')
+    // Control characters except newlines, and bidi overrides that could garble other lines.
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!s) throw new RoomError('Message is empty');
+  if ([...s].length > CHAT_MAX) throw new RoomError(`Message is too long (max ${CHAT_MAX} characters)`);
+  return s;
+}
+
 export class Room implements RoomSnapshot {
   row: RoomRow;
   settings: GameSettings;
@@ -69,6 +91,8 @@ export class Room implements RoomSnapshot {
   deleted = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly ctx: RoomContext;
+  /** Recent chat send times per user, for the flood limit. */
+  private readonly chatTimes = new Map<number, number[]>();
 
   constructor(ctx: RoomContext, row: RoomRow, players: PlayerState[], events: StoredEvent[]) {
     this.ctx = ctx;
@@ -103,6 +127,7 @@ export class Room implements RoomSnapshot {
     const state = buildView(this, sink.userId, this.ctx.now());
     sink.lastState = stateKey(state);
     sink.send({ type: 'update', state, entries: personalLog(this, sink.userId), resetLog: true });
+    this.sendChatHistory(sink);
   }
 
   detach(sink: Sink): void {
@@ -117,7 +142,7 @@ export class Room implements RoomSnapshot {
     if (this.players.size >= this.settings.maxPlayers) throw new RoomError('This room is full');
     const p: Omit<PlayerState, 'pid'> = {
       userId: user.id,
-      nickname: this.uniqueNickname(user.username),
+      nickname: this.uniqueNickname(this.defaultNickname(user)),
       flag: this.randomFreeFlag(),
       joinedAt: this.ctx.now(),
       q: null,
@@ -132,6 +157,7 @@ export class Room implements RoomSnapshot {
     const pid = this.ctx.store.insertParticipant(this.row.id, p);
     this.players.set(pid, { ...p, pid });
     this.commit([]);
+    this.refreshChat(user.id);
   }
 
   leave(userId: number): void {
@@ -176,9 +202,34 @@ export class Room implements RoomSnapshot {
   }
 
   private removeParticipant(pid: number): void {
+    const userId = this.players.get(pid)?.userId;
     this.ctx.store.deleteParticipant(pid);
     this.players.delete(pid);
     this.commit([]);
+    if (userId !== undefined) this.refreshChat(userId);
+  }
+
+  /** The account's display name when it has one (and it fits a nickname), else the username. */
+  private defaultNickname(user: { id: number; username: string }): string {
+    const display = this.ctx.store.userById(user.id)?.display_name;
+    if (display) {
+      try {
+        return cleanNickname([...display].slice(0, NICKNAME_MAX).join(''));
+      } catch {
+        // fall back to the username
+      }
+    }
+    return user.username;
+  }
+
+  /** Username and avatar for the room view (views.ts). */
+  userBrief(userId: number): { username: string; avatar: string | null } | undefined {
+    return this.ctx.store.userBrief(userId);
+  }
+
+  /** Re-sends the view to everyone whose view changed (e.g. a player's new avatar). */
+  refreshViews(): void {
+    if (!this.deleted) this.broadcast([]);
   }
 
   private uniqueNickname(base: string): string {
@@ -195,6 +246,64 @@ export class Room implements RoomSnapshot {
     const taken = new Set([...this.players.values()].map((p) => p.flag));
     const free = [...this.ctx.flagCodes].filter((c) => !taken.has(c));
     return free[Math.floor(this.ctx.rng() * free.length)] ?? 'xx';
+  }
+
+  // ---------------------------------------------------------------- chat
+
+  /**
+   * Sends a chat message: room-wide when `to` is null, otherwise privately to that player.
+   * With a `sticker` id the message is that sticker (and `text` is ignored).
+   */
+  chat(userId: number, to: unknown, text: unknown, sticker?: unknown): ChatMessage {
+    const me = this.participantOf(userId);
+    if (!me) throw new RoomError('Join the room to chat');
+    let toPid: number | null = null;
+    if (to !== null && to !== undefined) {
+      const target = typeof to === 'number' ? this.players.get(to) : undefined;
+      if (!target) throw new RoomError('That player is not in this room');
+      if (target.pid === me.pid) throw new RoomError("You can't message yourself");
+      toPid = target.pid;
+    }
+    let clean = '';
+    let stickerId: string | undefined;
+    if (sticker !== undefined && sticker !== null) {
+      if (typeof sticker !== 'string' || sticker.length > 300 || !this.ctx.stickers?.has(sticker)) throw new RoomError('That sticker is not available');
+      stickerId = sticker;
+    } else {
+      clean = cleanChatText(text);
+    }
+    const now = this.ctx.now();
+    const recent = (this.chatTimes.get(userId) ?? []).filter((t) => now - t < CHAT_WINDOW_MS);
+    if (recent.length >= CHAT_BURST) throw new RoomError('You are sending messages too fast');
+    recent.push(now);
+    this.chatTimes.set(userId, recent);
+
+    const msg = this.ctx.store.insertChat(this.row.id, {
+      ts: now,
+      from: me.pid,
+      fromName: me.nickname,
+      to: toPid,
+      text: clean,
+      ...(stickerId ? { sticker: stickerId } : {}),
+    });
+    for (const sink of this.sinks) {
+      const pid = this.participantOf(sink.userId)?.pid;
+      if (pid === undefined) continue;
+      if (msg.to === null || pid === msg.from || pid === msg.to) sink.send({ type: 'chat', messages: [msg] });
+    }
+    return msg;
+  }
+
+  /** Replaces a browser's chat with what its user may read now (nothing for non-participants). */
+  private sendChatHistory(sink: Sink): void {
+    const pid = this.participantOf(sink.userId)?.pid;
+    const messages = pid === undefined ? [] : this.ctx.store.chatFor(this.row.id, pid, CHAT_HISTORY);
+    sink.send({ type: 'chat', messages, reset: true });
+  }
+
+  /** After someone joins or leaves: their open tabs get (or lose) the chat history. */
+  private refreshChat(userId: number): void {
+    for (const sink of this.sinks) if (sink.userId === userId) this.sendChatHistory(sink);
   }
 
   // ---------------------------------------------------------------- game actions
@@ -372,7 +481,8 @@ export class Room implements RoomSnapshot {
       const at = positionOf(p)!;
       eliminate(p, null, now);
       events.push({ ts: now, type: 'eliminate', actor: null, target: pid, data: { at: [at.q, at.r] } });
-      if (this.phase === 'running' && alivePlayers(this.players).length <= 1) events.push(this.finish(now));
+      // Also when paused: otherwise the room would resume with one player left and never end.
+      if (alivePlayers(this.players).length <= 1) events.push(this.finish(now));
     }
     this.commit(events);
   }

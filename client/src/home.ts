@@ -3,7 +3,9 @@ import { ROOM_NAME_MAX } from '../../shared/protocol.ts';
 import { api } from './api.ts';
 import { h, replaceChildren, toast } from './dom.ts';
 import { countdown } from './format.ts';
-import { logout, navigate } from './nav.ts';
+import { navigate } from './nav.ts';
+import { profileHint, userMenu } from './profile.ts';
+import { emptyState, icon, logo } from './ui.ts';
 
 const PHASE_LABEL: Record<string, string> = {
   lobby: 'Lobby',
@@ -14,10 +16,10 @@ const PHASE_LABEL: Record<string, string> = {
 
 /** Home: create a room, your rooms, open lobbies. */
 export function showHome(app: HTMLElement, user: UserInfo): () => void {
-  const mineList = h('div', { class: 'room-list' });
-  const openList = h('div', { class: 'room-list' });
-  const nameInput = h('input', { placeholder: 'e.g. Friday night betrayal', maxlength: ROOM_NAME_MAX, required: true });
-  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Create room');
+  const mineList = h('div', { class: 'room-list' }, h('div', { class: 'skeleton' }));
+  const openList = h('div', { class: 'room-list' }, h('div', { class: 'skeleton' }));
+  const nameInput = h('input', { placeholder: 'e.g. Friday night betrayal', maxlength: ROOM_NAME_MAX, required: true, 'aria-label': 'Room name' });
+  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Create room');
   let serverOffset = 0;
   let data: RoomsResponse | null = null;
 
@@ -56,24 +58,35 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
           navigate(`/r/${r.code}`);
         },
       },
-      h('div', { class: 'room-card-main' }, h('strong', null, r.name), h('span', { class: 'muted' }, `by ${r.creator}`)),
+      h('span', { class: 'room-hex', 'aria-hidden': 'true' }, icon('hex')),
+      h(
+        'div',
+        { class: 'room-card-main' },
+        h('strong', { class: 'room-card-name' }, r.name),
+        h(
+          'span',
+          { class: 'room-card-meta' },
+          h('span', null, `by ${r.creator}`),
+          h('span', { class: 'dot-sep', 'aria-hidden': 'true' }),
+          h('span', { class: 'num' }, icon('users'), `${r.players}/${r.maxPlayers}`),
+          status ? [h('span', { class: 'dot-sep', 'aria-hidden': 'true' }), h('span', { class: 'num' }, status)] : null,
+        ),
+      ),
       h(
         'div',
         { class: 'room-card-side' },
         h('span', { class: `badge ${r.phase}` }, PHASE_LABEL[r.phase]),
-        h('span', { class: 'muted' }, `${r.players}/${r.maxPlayers} players`),
-        status ? h('span', { class: 'muted small' }, status) : null,
-        open ? h('span', { class: 'btn small' }, 'Open') : null,
+        open ? h('span', { class: 'btn small secondary' }, 'Open') : icon('chevron', 'room-go'),
       ),
     );
   }
 
   function render(): void {
     if (!data) return;
-    replaceChildren(mineList, data.mine.length ? data.mine.map((r) => roomCard(r, false)) : h('p', { class: 'empty' }, "You haven't joined any rooms yet."));
+    replaceChildren(mineList, data.mine.length ? data.mine.map((r) => roomCard(r, false)) : emptyState("You haven't joined any rooms yet", 'Create one above, or open a lobby a friend shared.'));
     replaceChildren(
       openList,
-      data.open.length ? data.open.map((r) => roomCard(r, true)) : h('p', { class: 'empty' }, 'No open lobbies right now. Create one and share the link!'),
+      data.open.length ? data.open.map((r) => roomCard(r, true)) : emptyState('No open lobbies right now', 'Create one and share the link. Every alliance starts with an invitation.'),
     );
   }
 
@@ -95,17 +108,24 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
       h(
         'header',
         { class: 'topbar' },
-        h('div', { class: 'logo small' }, h('span', { class: 'logo-mark' }, '⬢'), 'Alliance'),
+        logo(true),
         h('div', { class: 'spacer' }),
-        h('span', { class: 'muted' }, user.username),
-        h('button', { class: 'btn ghost small', onclick: () => logout() }, 'Log out'),
+        userMenu(user),
       ),
       h(
         'main',
         { class: 'home' },
-        h('section', { class: 'card' }, h('h2', null, 'Create a room'), h('p', { class: 'muted' }, 'You get a link to share with your friends. The game starts when the lobby time runs out (24 hours), or earlier when you start it.'), createForm),
-        h('section', { class: 'card' }, h('h2', null, 'Your rooms'), mineList),
-        h('section', { class: 'card' }, h('h2', null, 'Open lobbies'), openList),
+        profileHint(user),
+        h(
+          'section',
+          { class: 'card framed create-card' },
+          h('p', { class: 'eyebrow' }, 'New campaign'),
+          h('h1', { class: 'display' }, 'Create a room'),
+          h('p', { class: 'muted' }, 'You get a link to share with your friends. The game starts when the lobby time runs out (24 hours), or earlier when you start it.'),
+          createForm,
+        ),
+        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, 'Your rooms'), mineList),
+        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, 'Open lobbies'), openList),
       ),
     ),
   );

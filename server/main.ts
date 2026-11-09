@@ -5,9 +5,11 @@ import { startAdminServer } from './admin.ts';
 import { Auth } from './auth.ts';
 import { parseServerArgs, SERVER_HELP } from './config.ts';
 import { Store } from './db.ts';
+import { AvatarStore, Profiles } from './profile.ts';
 import { FLAG_CODES } from './flags.ts';
 import { createHttpServer } from './http.ts';
 import { RoomManager } from './rooms.ts';
+import { StickerLibrary } from './stickers.ts';
 import { attachWebSocket } from './ws.ts';
 import { TEST_MODE_SETTINGS } from '../shared/settings.ts';
 
@@ -34,6 +36,9 @@ if (opts.testMode) {
 Object.assign(overrides, opts.overrides);
 
 const store = new Store(opts.db);
+const stickers = new StickerLibrary(opts.stickersDir, log);
+stickers.scan();
+stickers.watch();
 const now = (): number => Date.now();
 const ctx = {
   store,
@@ -41,6 +46,7 @@ const ctx = {
   rng: () => randomInt(0, 0xffffffff) / 0xffffffff,
   flagCodes: FLAG_CODES,
   log,
+  stickers,
 };
 
 let rooms: RoomManager;
@@ -52,8 +58,10 @@ try {
 }
 rooms.loadAll();
 const auth = new Auth(store, now);
+const profiles = new Profiles(store, new AvatarStore(opts.avatarsDir), now);
+profiles.onAvatarChange = (userId) => rooms.refreshUser(userId);
 
-const server = createHttpServer({ auth, rooms, staticDir: opts.staticDir, log });
+const server = createHttpServer({ auth, rooms, stickers, profiles, staticDir: opts.staticDir, trustProxy: opts.trustProxy, log });
 const wss = attachWebSocket(server, { auth, rooms, log });
 const admin = startAdminServer(opts.adminSocket, { rooms, auth, store, now, log });
 
@@ -69,6 +77,8 @@ wss.on('error', onListenError);
 server.listen(opts.port, opts.host, () => {
   log(`Alliance server on http://localhost:${opts.port}${opts.testMode ? '  [TEST MODE]' : ''}`);
   log(`Database: ${opts.db}   rooms loaded: ${rooms.rooms.size}`);
+  log(`Stickers: ${stickers.count} from ${stickers.dir}`);
+  log(`Avatars: ${opts.avatarsDir}`);
   if (Object.keys(overrides).length) log(`Default overrides: ${JSON.stringify(overrides)}`);
 });
 
@@ -79,6 +89,7 @@ function shutdown(signal: string): void {
   log(`${signal} received, shutting down`);
   for (const ws of wss.clients) ws.close(1012, 'Server restarting');
   admin.close();
+  stickers.close();
   server.close();
   store.close();
   setTimeout(() => process.exit(0), 200).unref();
