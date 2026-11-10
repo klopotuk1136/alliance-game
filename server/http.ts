@@ -41,6 +41,9 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
   '.woff2': 'font/woff2',
   '.webmanifest': 'application/manifest+json',
+  '.mp4': 'video/mp4',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
 };
 
 class HttpError extends Error {
@@ -255,21 +258,34 @@ export function createHttpServer(deps: HttpDeps): Server {
     throw new HttpError(404, 'Not found');
   }
 
-  function serveFile(res: ServerResponse, file: string, cache: string): void {
+  function serveFile(req: IncomingMessage, res: ServerResponse, file: string, cache: string): void {
     const type = MIME[extname(file).toLowerCase()] ?? 'application/octet-stream';
-    res.writeHead(200, {
-      'Content-Type': type,
-      'Cache-Control': cache,
-      'Content-Length': statSync(file).size,
-      'X-Content-Type-Options': 'nosniff',
-    });
-    createReadStream(file).pipe(res);
+    const size = statSync(file).size;
+    const headers = { 'Content-Type': type, 'Cache-Control': cache, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff' };
+    // Byte ranges, so videos can seek and play on iOS Safari (it refuses media without 206).
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    if (range && (range[1] !== '' || range[2] !== '')) {
+      let start = range[1] === '' ? Math.max(0, size - Number(range[2])) : Number(range[1]);
+      let end = range[1] === '' || range[2] === '' ? size - 1 : Math.min(Number(range[2]), size - 1);
+      if (start > end || start >= size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+      if (req.method === 'HEAD') return void res.end();
+      createReadStream(file, { start, end }).on('error', () => res.destroy()).pipe(res);
+      return;
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': size });
+    if (req.method === 'HEAD') return void res.end();
+    createReadStream(file).on('error', () => res.destroy()).pipe(res);
   }
 
-  function serveFlag(res: ServerResponse, path: string): void {
+  function serveFlag(req: IncomingMessage, res: ServerResponse, path: string): void {
     const m = /^\/flags\/(1x1|4x3)\/([a-z-]+)\.svg$/.exec(path);
     if (!m || !FLAG_CODES.has(m[2])) throw new HttpError(404, 'Not found');
-    serveFile(res, join(FLAGS_DIR, m[1], `${m[2]}.svg`), 'public, max-age=604800');
+    serveFile(req, res, join(FLAGS_DIR, m[1], `${m[2]}.svg`), 'public, max-age=604800');
   }
 
   /** /avatars/<hash>.<ext>: content-addressed, so cached forever; the name pattern keeps paths safe. */
@@ -336,7 +352,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     createReadStream(f.path).on('error', () => res.destroy()).pipe(res);
   }
 
-  function serveStatic(res: ServerResponse, path: string): void {
+  function serveStatic(req: IncomingMessage, res: ServerResponse, path: string): void {
     const index = join(staticRoot, 'index.html');
     if (!existsSync(index)) {
       res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -352,9 +368,9 @@ export function createHttpServer(deps: HttpDeps): Server {
     const file = resolve(staticRoot, '.' + decoded);
     if ((file === staticRoot || file.startsWith(staticRoot + sep)) && existsSync(file) && statSync(file).isFile()) {
       const cache = decoded.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache';
-      return serveFile(res, file, cache);
+      return serveFile(req, res, file, cache);
     }
-    if (extname(decoded) === '' || decoded.startsWith('/r/')) return serveFile(res, index, 'no-cache');
+    if (extname(decoded) === '' || decoded.startsWith('/r/')) return serveFile(req, res, index, 'no-cache');
     throw new HttpError(404, 'Not found');
   }
 
@@ -367,12 +383,12 @@ export function createHttpServer(deps: HttpDeps): Server {
       ? api(req, res, path)
       : Promise.resolve().then(() =>
           path.startsWith('/flags/')
-            ? serveFlag(res, path)
+            ? serveFlag(req, res, path)
             : path.startsWith('/stickers/')
               ? serveSticker(req, res, path, url.search)
               : path.startsWith('/avatars/')
                 ? serveAvatar(req, res, path)
-                : serveStatic(res, path),
+                : serveStatic(req, res, path),
         );
     work.catch((err: unknown) => {
       if (res.headersSent) {
