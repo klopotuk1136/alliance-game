@@ -68,3 +68,18 @@ export function hexCorners(size: number): Array<{ x: number; y: number }> {
   }
   return pts;
 }
+
+/** The 6·k cells at exactly distance k from the centre, walking once around the ring (k ≥ 1). */
+export function hexRing(k: number): Hex[] {
+  if (k <= 0) return [{ q: 0, r: 0 }];
+  const out: Hex[] = [];
+  // Start at the corner reached by going k steps in direction 4, then walk each side.
+  let cur: Hex = { q: DIRECTIONS[4].q * k, r: DIRECTIONS[4].r * k };
+  for (let side = 0; side < 6; side++) {
+    for (let step = 0; step < k; step++) {
+      out.push(cur);
+      cur = { q: cur.q + DIRECTIONS[side].q, r: cur.r + DIRECTIONS[side].r };
+    }
+  }
+  return out;
+}

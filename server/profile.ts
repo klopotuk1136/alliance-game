@@ -114,6 +114,7 @@ export class Profiles {
 
   publicOf(user: UserRow): PublicProfile {
     const stats = this.store.userStats(user.id);
+    const rated = this.store.ratingStats(user.id);
     return {
       username: user.username,
       displayName: user.display_name ?? null,
@@ -123,6 +124,9 @@ export class Profiles {
       joinedAt: user.created_at,
       games: stats.games,
       wins: stats.wins,
+      rating: rated.rating,
+      ratedGames: rated.ratedGames,
+      winPoints: rated.winPoints,
     };
   }
 

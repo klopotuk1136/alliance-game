@@ -3,6 +3,7 @@
 // encoded as WebP (PNG where the browser can't, JPEG if that comes out too large), since
 // the server has no image libraries and stores exactly what it gets.
 
+import { L, t } from './i18n.ts';
 import { AVATAR_MAX_BYTES, AVATAR_SIZE } from '../../shared/profile.ts';
 import { h } from './dom.ts';
 import { icon } from './ui.ts';
@@ -12,8 +13,8 @@ const SOURCE_MAX_BYTES = 25 * 1024 * 1024;
 const MAX_ZOOM = 5;
 
 export async function loadImageFile(file: File): Promise<HTMLImageElement> {
-  if (file.size > SOURCE_MAX_BYTES) throw new Error('That file is too large to open (max 25 MB)');
-  if (file.type && !file.type.startsWith('image/')) throw new Error('Choose an image file');
+  if (file.size > SOURCE_MAX_BYTES) throw new Error(t('crop.tooLarge'));
+  if (file.type && !file.type.startsWith('image/')) throw new Error(t('crop.chooseImage'));
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.decoding = 'async';
@@ -22,11 +23,11 @@ export async function loadImageFile(file: File): Promise<HTMLImageElement> {
     await img.decode();
   } catch {
     URL.revokeObjectURL(url);
-    throw new Error("That image couldn't be opened");
+    throw new Error(t('crop.cantOpen'));
   }
   if (img.naturalWidth < 16 || img.naturalHeight < 16) {
     URL.revokeObjectURL(url);
-    throw new Error('That image is too small');
+    throw new Error(t('crop.tooSmall'));
   }
   return img;
 }
@@ -60,17 +61,17 @@ export class AvatarCropper {
         class: 'crop-stage',
         tabindex: '0',
         role: 'group',
-        'aria-roledescription': 'image cropper',
-        'aria-label': 'Crop your picture. Drag or use the arrow keys to move it; scroll, pinch or press + and − to zoom.',
+        'aria-roledescription': L('crop.role'),
+        'aria-label': L('crop.aria'),
       },
       this.canvas,
       h('span', { class: 'crop-ring', 'aria-hidden': 'true' }),
     );
-    this.slider = h('input', { class: 'crop-zoom', type: 'range', min: '0', max: '1000', value: '0', 'aria-label': 'Zoom' });
+    this.slider = h('input', { class: 'crop-zoom', type: 'range', min: '0', max: '1000', value: '0', 'aria-label': L('crop.zoom') });
     const zoomBtn = (dir: 1 | -1): HTMLButtonElement =>
       h(
         'button',
-        { class: 'btn ghost small crop-zbtn', type: 'button', 'aria-label': dir > 0 ? 'Zoom in' : 'Zoom out', onclick: () => this.zoomBy(dir > 0 ? 1.2 : 1 / 1.2) },
+        { class: 'btn ghost small crop-zbtn', type: 'button', 'aria-label': L(dir > 0 ? 'crop.zoomIn' : 'crop.zoomOut'), onclick: () => this.zoomBy(dir > 0 ? 1.2 : 1 / 1.2) },
         icon(dir > 0 ? 'plus' : 'minus'),
       );
     this.el = h('div', { class: 'cropper' }, this.stage, h('div', { class: 'crop-tools' }, zoomBtn(-1), this.slider, zoomBtn(1)));
@@ -229,7 +230,7 @@ export class AvatarCropper {
   async export(): Promise<Blob> {
     const out = h('canvas', { width: AVATAR_SIZE, height: AVATAR_SIZE });
     const g = out.getContext('2d');
-    if (!g) throw new Error("This browser can't prepare images");
+    if (!g) throw new Error(t('crop.noCanvas'));
     g.imageSmoothingQuality = 'high';
     const crop = this.cropRect();
     // Downscale in halving steps first: one big jump from a 4000 px photo looks grainy.
@@ -259,7 +260,7 @@ export class AvatarCropper {
     if (png && png.size <= AVATAR_MAX_BYTES) return png;
     const jpeg = await toBlob(out, 'image/jpeg', 0.82);
     if (jpeg && jpeg.size <= AVATAR_MAX_BYTES) return jpeg;
-    throw new Error("Couldn't make the picture small enough");
+    throw new Error(t('crop.tooBig'));
   }
 
   destroy(): void {

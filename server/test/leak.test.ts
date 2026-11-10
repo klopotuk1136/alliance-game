@@ -162,6 +162,6 @@ test('failed actions are reported only to the sender', () => {
   const res = room.act(sa, alice.id, 7, { type: 'upgrade' });
   assert.equal(res.ok, false);
   const last = sa.messages[sa.messages.length - 1] as Extract<ServerMessage, { type: 'update' }>;
-  assert.deepEqual(last.result, { id: 7, ok: false, error: 'Not enough AP (need 2, you have 0)' });
+  assert.deepEqual(last.result, { id: 7, ok: false, error: 'Not enough AP (need 2, you have 0)', code: 'notEnoughAp', params: { cost: '2', have: '0' } });
   assert.equal(sb.messages.length, nb);
 });

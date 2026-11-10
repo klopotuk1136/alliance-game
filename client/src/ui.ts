@@ -3,7 +3,12 @@
 // form element or ARIA role underneath, dispatches bubbling `input` / `change` events on
 // its root (so a surrounding <form> listener sees edits), and works with touch.
 
-import { h, s } from './dom.ts';
+import { h, onCloseTransient, s } from './dom.ts';
+import { L, LocalizedAttr, t, T } from './i18n.ts';
+
+/** An accessible name or text: plain, or one that follows the language (`L('key')`). */
+export type Label = string | LocalizedAttr;
+const labelText = (l: Label): string => (l instanceof LocalizedAttr ? t(l.key, typeof l.params === 'function' ? l.params() : l.params) : l);
 
 // ------------------------------------------------------------------ icons
 
@@ -41,6 +46,22 @@ const ICONS: Record<string, string> = {
   external: 'M14 4h6v6M20 4l-9 9M18 14v6H4V6h6',
   trash: 'M5 7h14M9.5 7V4.5h5V7M7 7l1 13h8l1-13',
   seal: 'M12 3 14 5.2l3-.4.6 3 2.6 1.6-1.3 2.6 1.3 2.6-2.6 1.6-.6 3-3-.4L12 21l-2-2.2-3 .4-.6-3-2.6-1.6 1.3-2.6-1.3-2.6 2.6-1.6.6-3 3 .4Z',
+  // chat groups & plans (client/src/chat.ts, plan.ts)
+  map: 'M3.5 6.5 9 4l6 2.5 5.5-2.5v13.5L15 20l-6-2.5-5.5 2.5ZM9 4v13.5M15 6.5V20',
+  more: 'M6 12h.01M12 12h.01M18 12h.01',
+  edit: 'M4 20h4L19 9l-4-4L4 16ZM13.5 6.5l4 4',
+  undo: 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
+  redo: 'M15 14l5-5-5-5M20 9H10a6 6 0 0 0 0 12h3',
+  eraser: 'M8.5 19.5h11M4.5 15.5l9-9 6 6-7 7h-4ZM9 11l6 6',
+  hand: 'M8 12V6a1.5 1.5 0 0 1 3 0v5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v7c0 4-2.5 7-6 7-2.7 0-4.2-1.4-5.6-3.6L3.6 13.5a1.4 1.4 0 0 1 2.3-1.6L8 14',
+  target: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 11.5v1',
+  shield: 'M12 3.5 19 6v5.5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6Z',
+  flag: 'M6 21V4M6 4.5h11l-2.5 4 2.5 4H6',
+  note: 'M5 4h14v11l-5 5H5ZM14 20v-5h5M8.5 9h7M8.5 12.5h4',
+  ghost: 'M12 3.5a6.5 6.5 0 0 0-6.5 6.5v10l2.2-1.6 2.1 1.6 2.2-1.6 2.2 1.6 2.1-1.6 2.2 1.6V10A6.5 6.5 0 0 0 12 3.5ZM9.5 10h.01M14.5 10h.01',
+  refresh: 'M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4',
+  fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  bolt: 'M13 3 5 13.5h6L10 21l8-10.5h-6Z',
 };
 
 /** A 24×24 stroke icon. Decorative unless a label is given. */
@@ -96,8 +117,8 @@ interface ListboxOpts<V extends string> {
   onClose: () => void;
   searchable: boolean;
   searchPlaceholder?: string;
-  label: string;
-  emptyText?: string;
+  label: Label;
+  emptyText?: Label;
   /** Minimum popover width; defaults to the anchor's width. */
   minWidth?: number;
 }
@@ -115,6 +136,7 @@ class Listbox<V extends string> {
   private active = -1;
   private typed = '';
   private typedAt = 0;
+  private offTransient: (() => void) | null = null;
   private readonly onDocDown = (ev: PointerEvent): void => {
     const t = ev.target as Node;
     if (!this.el.contains(t) && !this.o.anchor.contains(t)) this.close();
@@ -132,14 +154,14 @@ class Listbox<V extends string> {
       this.search = h('input', {
         class: 'lb-search',
         type: 'text',
-        placeholder: o.searchPlaceholder ?? 'Search…',
+        placeholder: o.searchPlaceholder ?? L('ui.searchPlaceholder'),
         autocomplete: 'off',
         spellcheck: 'false',
         role: 'combobox',
         'aria-expanded': 'true',
         'aria-controls': this.id,
         'aria-autocomplete': 'list',
-        'aria-label': `Search ${o.label.toLowerCase()}`,
+        'aria-label': L('ui.searchIn', () => ({ label: labelText(o.label).toLowerCase() })),
       });
       this.search.addEventListener('input', () => {
         this.render();
@@ -174,6 +196,7 @@ class Listbox<V extends string> {
     document.addEventListener('pointerdown', this.onDocDown, true);
     window.addEventListener('resize', this.onReflow);
     window.addEventListener('scroll', this.onReflow, true);
+    this.offTransient = onCloseTransient(() => this.close());
     if (this.search) {
       this.search.value = '';
       this.render();
@@ -193,6 +216,8 @@ class Listbox<V extends string> {
     document.removeEventListener('pointerdown', this.onDocDown, true);
     window.removeEventListener('resize', this.onReflow);
     window.removeEventListener('scroll', this.onReflow, true);
+    this.offTransient?.();
+    this.offTransient = null;
     this.o.onClose();
   }
 
@@ -209,7 +234,7 @@ class Listbox<V extends string> {
     const sel = this.o.selected();
     this.list.textContent = '';
     if (!slice.length) {
-      this.list.appendChild(h('li', { class: 'lb-empty', role: 'presentation' }, this.o.emptyText ?? 'Nothing matches'));
+      this.list.appendChild(h('li', { class: 'lb-empty', role: 'presentation' }, this.o.emptyText !== undefined ? labelText(this.o.emptyText) : t('common.noMatches')));
       return;
     }
     slice.forEach((x, i) => {
@@ -233,7 +258,7 @@ class Listbox<V extends string> {
       );
     });
     if (this.shown.length > slice.length) {
-      this.list.appendChild(h('li', { class: 'lb-empty', role: 'presentation' }, `${this.shown.length - slice.length} more… type to narrow`));
+      this.list.appendChild(h('li', { class: 'lb-empty', role: 'presentation' }, t('ui.moreNarrow', { n: this.shown.length - slice.length })));
     }
   }
 
@@ -374,7 +399,7 @@ export interface SelectOpts<V extends string> {
   options: ListOption<V>[];
   value?: V;
   /** Accessible name. */
-  label: string;
+  label: Label;
   placeholder?: string;
   searchable?: boolean;
   searchPlaceholder?: string;
@@ -394,13 +419,13 @@ export class Select<V extends string = string> {
   private opts: ListOption<V>[];
   private current: V | null;
   private readonly valueEl = h('span', { class: 'sel-value' });
-  private readonly placeholder: string;
+  private readonly placeholder: string | null;
   private readonly lb: Listbox<V>;
 
   constructor(o: SelectOpts<V>) {
     this.opts = o.options;
     this.current = o.value ?? o.options[0]?.value ?? null;
-    this.placeholder = o.placeholder ?? 'Choose…';
+    this.placeholder = o.placeholder ?? null;
     this.onChange = o.onChange ?? (() => undefined);
     this.button = h(
       'button',
@@ -500,7 +525,7 @@ export class Select<V extends string = string> {
     const x = this.opts.find((o) => o.value === this.current);
     this.valueEl.textContent = '';
     if (x?.lead) this.valueEl.appendChild(h('span', { class: 'lb-lead' }, x.lead()));
-    this.valueEl.appendChild(h('span', { class: x ? 'sel-text' : 'sel-text placeholder' }, x?.label ?? this.placeholder));
+    this.valueEl.appendChild(h('span', { class: x ? 'sel-text' : 'sel-text placeholder' }, x?.label ?? this.placeholder ?? t('ui.choose')));
   }
 }
 
@@ -509,14 +534,14 @@ export class Select<V extends string = string> {
 export interface MenuOpts<V extends string> {
   /** Content of the trigger button. */
   trigger: Array<Node | string>;
-  label: string;
+  label: Label;
   options: () => ListOption<V>[];
   onPick: (v: V) => void;
   cls?: string;
   searchable?: boolean;
-  emptyText?: string;
+  emptyText?: Label;
   minWidth?: number;
-  title?: string;
+  title?: Label;
 }
 
 /** A button that opens a listbox of choices and fires `onPick` (no persistent value). */
@@ -578,7 +603,7 @@ export interface StepperOpts {
   step?: number;
   /** Accepts fractions (duration fields); buttons still step by `step`. */
   decimal?: boolean;
-  label?: string;
+  label?: Label;
 }
 
 /** A number input with −/+ buttons. `input` is a real <input type="number"> (spinners hidden). */
@@ -601,8 +626,8 @@ export class Stepper {
       required: true,
       'aria-label': o.label ?? null,
     });
-    this.dec = h('button', { class: 'stepper-btn', type: 'button', tabindex: '-1', 'aria-label': 'Decrease' }, icon('minus'));
-    this.inc = h('button', { class: 'stepper-btn', type: 'button', tabindex: '-1', 'aria-label': 'Increase' }, icon('plus'));
+    this.dec = h('button', { class: 'stepper-btn', type: 'button', tabindex: '-1', 'aria-label': L('ui.decrease') }, icon('minus'));
+    this.inc = h('button', { class: 'stepper-btn', type: 'button', tabindex: '-1', 'aria-label': L('ui.increase') }, icon('plus'));
     this.el = h('div', { class: 'stepper' }, this.dec, this.input, this.inc);
     this.hold(this.dec, -1);
     this.hold(this.inc, 1);
@@ -679,9 +704,9 @@ export class Stepper {
 // ------------------------------------------------------------------ segmented control
 
 export interface SegOpts<V extends string> {
-  options: Array<{ value: V; label: string; title?: string }>;
+  options: Array<{ value: V; label: string | Node; title?: Label }>;
   value?: V;
-  label: string;
+  label: Label;
   onChange?: (v: V) => void;
   cls?: string;
 }
@@ -745,9 +770,9 @@ export class Segmented<V extends string = string> {
 // ------------------------------------------------------------------ search field
 
 /** A search input with a leading icon and a clear button. */
-export function searchField(placeholder: string, label = placeholder): { el: HTMLElement; input: HTMLInputElement } {
+export function searchField(placeholder: Label, label: Label = placeholder): { el: HTMLElement; input: HTMLInputElement } {
   const input = h('input', { class: 'search-input', type: 'search', placeholder, autocomplete: 'off', spellcheck: 'false', 'aria-label': label });
-  const clear = h('button', { class: 'search-clear', type: 'button', 'aria-label': 'Clear search', hidden: true }, icon('close'));
+  const clear = h('button', { class: 'search-clear', type: 'button', 'aria-label': L('ui.clearSearch'), hidden: true }, icon('close'));
   const sync = (): void => {
     clear.hidden = input.value === '';
   };
@@ -770,7 +795,7 @@ export function searchField(placeholder: string, label = placeholder): { el: HTM
 }
 
 /** An empty state: a faint hex cluster, a title and a line of help. */
-export function emptyState(title: string, text?: string, cls = ''): HTMLElement {
+export function emptyState(title: string | Node, text?: string | Node, cls = ''): HTMLElement {
   const hexAt = (x: number, y: number, cl: string) =>
     s('path', { class: cl, d: `M${x} ${y - 10} ${x + 8.66} ${y - 5} ${x + 8.66} ${y + 5} ${x} ${y + 10} ${x - 8.66} ${y + 5} ${x - 8.66} ${y - 5}Z` });
   const art = s(

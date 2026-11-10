@@ -11,6 +11,7 @@
 
 import { PerspectiveCamera, Plane, Raycaster, Vector2, Vector3 } from 'three';
 import { clamp, clamp01, FOV, SQRT3, TILE_TOP, TILT_DEFAULT, TILT_MAX, TILT_MIN, frameRadius } from './util.ts';
+import { LONG_PRESS_MS } from '../press-ring.ts';
 
 export interface CamState {
   tx: number;
@@ -220,16 +221,24 @@ export class OrbitRig {
 // ------------------------------------------------------------------ controls
 
 export interface ControlHooks {
-  /** A tap / click without drag. */
-  tap(e: PointerEvent): void;
+  /** A tap / click without drag; `downAt` = the pointerdown's event time. */
+  tap(e: PointerEvent, downAt: number): void;
   /** Mouse/pen moved over the board without a button pressed. */
   hover(x: number, y: number, pointerType: string): void;
   /** A drag began (hover should clear). */
   dragStart(): void;
   /** The view changed: draw a frame. */
   changed(): void;
-  dblclick(e: MouseEvent): void;
+  /** Right-click (or ctrl+click) without drag: the context menu, not a pan. */
+  context?(e: PointerEvent): void;
+  /** A touch/pen press began; return true to arm the long-press timer (e.g. it is on a cell). */
+  pressStart?(x: number, y: number): boolean;
+  /** The armed press was held still long enough. */
+  longPress?(x: number, y: number): void;
+  /** The armed press ended: fired, or cancelled by a lift, drag or second finger. */
+  pressEnd?(fired: boolean): void;
 }
+
 
 type Mode = 'orbit' | 'pan' | 'pinch';
 
@@ -243,6 +252,12 @@ export class OrbitControls {
     moved: boolean;
     multi: boolean;
     mode: Mode;
+    /** right button / ctrl+click: a click opens the menu, a drag pans */
+    ctx: boolean;
+    /** a long-press fired: the rest of this gesture is ignored */
+    held: boolean;
+    /** pointerdown event time */
+    t0: number;
     spread0: number;
     d0: number;
     angle0: number;
@@ -252,6 +267,8 @@ export class OrbitControls {
   private readonly tmp2 = new Vector3();
   /** Last user input time (performance.now), for the lobby turntable. */
   lastInput = 0;
+  private pressTimer = 0;
+  private pressArmed = false;
 
   constructor(
     private readonly el: HTMLElement,
@@ -269,6 +286,7 @@ export class OrbitControls {
   }
 
   dispose(): void {
+    this.cancelPress();
     const el = this.el;
     el.removeEventListener('pointerdown', this.onDown);
     el.removeEventListener('pointermove', this.onMove);
@@ -293,6 +311,7 @@ export class OrbitControls {
 
   private readonly onDown = (e: PointerEvent): void => {
     this.lastInput = performance.now();
+    const ctx = e.pointerType === 'mouse' && (e.button === 2 || (e.button === 0 && e.ctrlKey));
     const pan = e.pointerType === 'mouse' && (e.button === 2 || e.button === 1 || e.shiftKey);
     if (e.pointerType === 'mouse' && e.button !== 0 && !pan) return;
     try {
@@ -302,9 +321,27 @@ export class OrbitControls {
     }
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     if (this.pointers.size === 1) {
-      this.g = { sx: e.clientX, sy: e.clientY, moved: false, multi: false, mode: pan ? 'pan' : 'orbit', spread0: 0, d0: this.rig.goal.d, angle0: 0, az0: this.rig.goal.az };
+      this.g = { sx: e.clientX, sy: e.clientY, moved: false, multi: false, mode: pan ? 'pan' : 'orbit', ctx, held: false, t0: e.timeStamp, spread0: 0, d0: this.rig.goal.d, angle0: 0, az0: this.rig.goal.az };
       if (pan) e.preventDefault();
+      if (e.pointerType !== 'mouse' && !this.preview && this.hooks.pressStart?.(e.clientX, e.clientY)) {
+        const g = this.g;
+        const { clientX: x, clientY: y } = e;
+        this.pressArmed = true;
+        this.pressTimer = window.setTimeout(() => {
+          this.pressTimer = 0;
+          // input already queued for this frame (a drag, a second finger) lands first:
+          // pointermove is frame-aligned, so on a busy frame it can trail the timer
+          requestAnimationFrame(() => {
+            if (!this.pressArmed || this.g !== g || g.moved || g.multi) return;
+            this.pressArmed = false;
+            g.held = true;
+            this.hooks.pressEnd?.(true);
+            this.hooks.longPress?.(x, y);
+          });
+        }, LONG_PRESS_MS);
+      }
     } else if (this.g && this.pointers.size === 2) {
+      this.cancelPress();
       const [a, b] = [...this.pointers.values()];
       Object.assign(this.g, {
         multi: true,
@@ -326,11 +363,13 @@ export class OrbitControls {
       return;
     }
     const g = this.g;
-    if (!g) return;
+    if (!g || g.held) return;
     this.lastInput = performance.now();
     if (!g.moved) {
-      const thr = e.pointerType === 'mouse' ? 4 : 9;
+      // touch slop: a finger wobbles ~10 px during a tap on real phones
+      const thr = e.pointerType === 'mouse' ? 4 : 12;
       if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < thr) return;
+      this.cancelPress();
       g.moved = true;
       this.hooks.dragStart();
       this.el.style.cursor = 'grabbing';
@@ -371,9 +410,13 @@ export class OrbitControls {
     this.pointers.delete(e.pointerId);
     const g = this.g;
     if (this.pointers.size === 0) {
+      this.cancelPress();
       this.g = null;
       this.el.style.cursor = '';
-      if (g && !g.moved && !g.multi && e.type === 'pointerup') this.hooks.tap(e);
+      if (g && !g.moved && !g.multi && !g.held && e.type === 'pointerup') {
+        if (g.ctx) this.hooks.context?.(e);
+        else this.hooks.tap(e, g.t0);
+      }
       this.hooks.changed();
     } else if (g && this.pointers.size === 1) {
       // pinch → one finger left: carry on orbiting from here
@@ -386,10 +429,18 @@ export class OrbitControls {
     if (e.pointerType === 'mouse' && !this.pointers.size) this.hooks.hover(-1, -1, 'leave');
   };
 
-  private readonly onDbl = (e: MouseEvent): void => {
-    e.preventDefault();
-    this.hooks.dblclick(e);
-  };
+  // Double-click / double-tap is detected from two taps in board.ts (one path for mouse
+  // and touch); the native event only needs its default (text selection) suppressed.
+  private readonly onDbl = (e: MouseEvent): void => e.preventDefault();
+
+  private cancelPress(): void {
+    if (this.pressTimer) clearTimeout(this.pressTimer);
+    this.pressTimer = 0;
+    if (this.pressArmed) {
+      this.pressArmed = false;
+      this.hooks.pressEnd?.(false);
+    }
+  }
 
   private readonly onWheel = (e: WheelEvent): void => {
     if (this.preview && !e.ctrlKey && !e.metaKey) return; // let the lobby page scroll

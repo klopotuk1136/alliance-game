@@ -3,7 +3,8 @@
 
 import type { StickerInfo, StickerPack, StickersResponse } from '../../shared/protocol.ts';
 import { api } from './api.ts';
-import { h, replaceChildren, s } from './dom.ts';
+import { h, onCloseTransient, replaceChildren, s } from './dom.ts';
+import { L, onLang, t } from './i18n.ts';
 
 // ---------------------------------------------------------------- catalog
 
@@ -55,7 +56,7 @@ export function stickerName(id: string): string {
   const known = byId.get(id);
   if (known) return known.name;
   const file = id.split('/').pop() ?? id;
-  return file.replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').trim() || 'sticker';
+  return file.replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').trim() || t('chat.stickerFallback');
 }
 
 /** URL of a sticker: the versioned one from the catalog, or the plain path while it loads. */
@@ -105,11 +106,13 @@ export class StickerPicker {
   readonly button: HTMLButtonElement;
   private readonly panel: HTMLElement;
   private readonly backdrop = h('div', { class: 'stk-backdrop', 'aria-hidden': 'true' });
-  private readonly tabsEl = h('div', { class: 'stk-tabs', role: 'tablist', 'aria-label': 'Sticker packs' });
+  private readonly tabsEl = h('div', { class: 'stk-tabs', role: 'tablist', 'aria-label': L('chat.stickerPacks') });
   private readonly bodyEl = h('div', { class: 'stk-body' });
   private readonly onPick: (id: string) => void;
   private activePack = '';
   private isOpen = false;
+  private failed = false;
+  private offTransient: (() => void) | null = null;
   private readonly id = `stk-${Math.random().toString(36).slice(2, 8)}`;
 
   private readonly onDocDown = (ev: PointerEvent): void => {
@@ -125,8 +128,8 @@ export class StickerPicker {
       {
         class: 'btn ghost sticker-btn',
         type: 'button',
-        'aria-label': 'Stickers',
-        title: 'Stickers',
+        'aria-label': L('chat.stickers'),
+        title: L('chat.stickers'),
         'aria-haspopup': 'dialog',
         'aria-expanded': 'false',
         'aria-controls': this.id,
@@ -136,7 +139,7 @@ export class StickerPicker {
     this.button.addEventListener('click', () => (this.isOpen ? this.close() : this.open()));
     this.panel = h(
       'div',
-      { class: 'stk-panel', id: this.id, role: 'dialog', 'aria-label': 'Stickers', hidden: true },
+      { class: 'stk-panel', id: this.id, role: 'dialog', 'aria-label': L('chat.stickers'), hidden: true },
       h('div', { class: 'stk-grab', 'aria-hidden': 'true' }),
       this.tabsEl,
       this.bodyEl,
@@ -149,6 +152,10 @@ export class StickerPicker {
     this.backdrop.addEventListener('click', () => this.close(true));
     onStickersChange(() => {
       if (this.isOpen) this.render();
+    });
+    // The picker lives as long as the chat panel (the whole room page).
+    onLang(() => {
+      if (this.isOpen) this.render(this.failed);
     });
   }
 
@@ -182,6 +189,7 @@ export class StickerPicker {
     });
     document.addEventListener('pointerdown', this.onDocDown, true);
     window.addEventListener('resize', this.onReflow);
+    this.offTransient = onCloseTransient(() => this.close());
     this.focusFirst();
     // Pick up stickers added on the server since the catalog was loaded.
     loadStickers().catch(() => {
@@ -200,6 +208,8 @@ export class StickerPicker {
     this.backdrop.remove();
     document.removeEventListener('pointerdown', this.onDocDown, true);
     window.removeEventListener('resize', this.onReflow);
+    this.offTransient?.();
+    this.offTransient = null;
     if (refocus) this.button.focus();
   }
 
@@ -256,15 +266,16 @@ export class StickerPicker {
   }
 
   private render(failed = false): void {
+    this.failed = failed;
     if (!this.isOpen) return;
     if (!stickersLoaded()) {
       replaceChildren(this.tabsEl);
-      replaceChildren(this.bodyEl, h('p', { class: 'stk-note' }, failed ? "Couldn't load stickers. Try again in a moment." : 'Loading stickers…'));
+      replaceChildren(this.bodyEl, h('p', { class: 'stk-note' }, failed ? t('chat.stickersFailed') : t('chat.stickersLoading')));
       return;
     }
     if (!packs.length) {
       replaceChildren(this.tabsEl);
-      replaceChildren(this.bodyEl, h('p', { class: 'stk-note' }, 'No stickers yet.'));
+      replaceChildren(this.bodyEl, h('p', { class: 'stk-note' }, t('chat.stickersNone')));
       return;
     }
     if (!packs.some((p) => p.id === this.activePack)) this.activePack = packs[0].id;
@@ -308,8 +319,8 @@ export class StickerPicker {
       recent.length
         ? h(
             'section',
-            { class: 'stk-section stk-recent', 'aria-label': 'Recently used' },
-            h('h3', { class: 'stk-label' }, 'Recent'),
+            { class: 'stk-section stk-recent', 'aria-label': t('chat.stickersRecentLabel') },
+            h('h3', { class: 'stk-label' }, t('chat.stickersRecent')),
             h('div', { class: 'stk-row' }, recent.map((st) => this.cell(st))),
           )
         : null,

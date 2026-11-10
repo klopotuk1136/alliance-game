@@ -65,6 +65,17 @@ export function shortName(name: string): string {
   return chars.length > 9 ? chars.slice(0, 8).join('') + '…' : name;
 }
 
+/** One or two capitals for a crowded label: "Bob the Bold" → "BB", "Алиса" → "Ал". */
+export function initials(name: string): string {
+  const words = name.trim().split(/\s+/).filter((w) => /\p{L}|\p{N}/u.test(w));
+  if (!words.length) return [...name.trim()].slice(0, 2).join('') || '?';
+  if (words.length === 1) {
+    const c = [...words[0]];
+    return (c[0].toUpperCase() + (c[1] ?? '')).trim();
+  }
+  return ([...words[0]][0] + [...words[words.length - 1]][0]).toUpperCase();
+}
+
 export function cssColor(name: string, fallback: string): Color {
   let v = '';
   try {

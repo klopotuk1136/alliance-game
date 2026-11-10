@@ -8,6 +8,10 @@ import { h, replaceChildren, toast } from './dom.ts';
 import { GameView } from './game.ts';
 import { LobbyView } from './lobby.ts';
 import { navigate } from './nav.ts';
+import { errorText } from './errors.ts';
+import { setTitle, t, T } from './i18n.ts';
+import { alertsForChat, alertsForEntries, setActiveRoom } from './notify-room.ts';
+import { hideOffer, maybeOfferNotifications } from './notify-panel.ts';
 
 export interface RoomCtx {
   code: string;
@@ -34,8 +38,8 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
   let offset = 0;
   let current: View | null = null;
 
-  const banner = h('div', { class: 'conn-banner hidden' }, 'Connection lost. Reconnecting…');
-  const host = h('div', { class: 'room-host' }, h('div', { class: 'loading' }, 'Connecting…'));
+  const banner = h('div', { class: 'conn-banner hidden' }, T('app.connLost'));
+  const host = h('div', { class: 'room-host' }, h('div', { class: 'loading' }, T('app.connecting')));
   replaceChildren(app, banner, host);
 
   const ctx: RoomCtx = {
@@ -43,13 +47,13 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
     user,
     send(msg) {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-      else toast('Not connected yet', 'error');
+      else toast(t('app.notConnected'), 'error');
     },
     serverNow: () => Date.now() + offset,
-    chat: new ChatPanel((to, text, sticker) => ctx.send(sticker ? { type: 'chat', to, text, sticker } : { type: 'chat', to, text })),
+    chat: new ChatPanel((msg) => ctx.send(msg)),
   };
 
-  function message(text: string): void {
+  function message(text: string | Node): void {
     stopped = true;
     destroyView();
     replaceChildren(
@@ -57,7 +61,7 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
       h(
         'main',
         { class: 'center-msg' },
-        h('div', { class: 'card' }, h('p', null, text), h('button', { class: 'btn primary', onclick: () => navigate('/') }, 'Back to rooms')),
+        h('div', { class: 'card' }, h('p', null, text), h('button', { class: 'btn primary', onclick: () => navigate('/') }, T('app.backToRooms'))),
       ),
     );
   }
@@ -85,8 +89,8 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
               'div',
               { class: 'card' },
               h('h2', null, state.name),
-              h('p', null, 'This game has already started, and only its players can see it.'),
-              h('button', { class: 'btn primary', onclick: () => navigate('/') }, 'Back to rooms'),
+              h('p', null, T('app.outsideGame')),
+              h('button', { class: 'btn primary', onclick: () => navigate('/') }, T('app.backToRooms')),
             ),
           ),
         };
@@ -105,16 +109,21 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
         navigate(location.pathname);
         return;
       }
-      message(msg.message);
+      message(errorText(msg.message, msg));
       ws?.close();
       return;
     }
     if (msg.type === 'notice') {
-      toast(msg.message, msg.level === 'error' ? 'error' : 'info', 3000);
+      toast(errorText(msg.message, msg), msg.level === 'error' ? 'error' : 'info', 3000);
       return;
     }
     if (msg.type === 'chat') {
       ctx.chat.addMessages(msg.messages, msg.reset ?? false);
+      if (!msg.reset && state) alertsForChat(msg.messages, state, user);
+      return;
+    }
+    if (msg.type === 'groups' || msg.type === 'plan' || msg.type === 'plan_op') {
+      ctx.chat.handle(msg);
       return;
     }
     if (msg.type !== 'update') return;
@@ -123,13 +132,17 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
     else if (msg.entries) {
       log.push(...msg.entries);
       fresh = msg.entries;
+      if (state) alertsForEntries(msg.entries, msg.state ?? state, user);
     }
     if (msg.state) {
+      if (msg.state.name !== state?.name) setTitle('app.titleRoom', { name: msg.state.name });
       state = msg.state;
       offset = state.serverNow - Date.now();
     }
     if (msg.state || fresh.length) render(fresh, msg.result);
     else if (msg.result && current?.kind === 'game') current.view.result(msg.result);
+    // After the render: the card sits inside the screen now shown (lobby or game).
+    if (msg.state && state && state.participant && state.phase !== 'finished') maybeOfferNotifications();
   }
 
   function connect(): void {
@@ -141,6 +154,7 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
       retries = 0;
       banner.classList.add('hidden');
       socket.send(JSON.stringify({ type: 'hello', token: getToken() ?? '', room: code } satisfies ClientMessage));
+      sendVisibility();
     };
     socket.onmessage = (ev) => {
       try {
@@ -156,8 +170,18 @@ export function showRoom(app: HTMLElement, code: string, user: UserInfo): () => 
     };
   }
 
+  /** The server pushes no notifications about this room while it is on screen. */
+  function sendVisibility(): void {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'visibility', visible: document.visibilityState === 'visible' } satisfies ClientMessage));
+  }
+  document.addEventListener('visibilitychange', sendVisibility);
+  setActiveRoom(code);
+
   connect();
   return () => {
+    document.removeEventListener('visibilitychange', sendVisibility);
+    setActiveRoom(null);
+    hideOffer();
     stopped = true;
     clearTimeout(retryTimer);
     ws?.close();

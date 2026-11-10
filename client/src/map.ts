@@ -9,9 +9,9 @@
 import type { Hex } from '../../shared/hex.ts';
 import type { PublicPlayer } from '../../shared/protocol.ts';
 import { SvgHexMap } from './map-svg.ts';
-import type { MapImpl, MapInput } from './map-types.ts';
+import type { BoardAction, CellGesture, MapImpl, MapInput, OrderMark } from './map-types.ts';
 
-export type { MapInput } from './map-types.ts';
+export type { BoardAction, CellGesture, MapInput, OrderMark } from './map-types.ts';
 
 function wantsSvg(): boolean {
   try {
@@ -40,6 +40,8 @@ export class HexMap {
   readonly el: HTMLDivElement;
   onHover: (h: Hex | null) => void = () => undefined;
   onSelect: (h: Hex | null) => void = () => undefined;
+  onMenu: (g: CellGesture) => void = () => undefined;
+  onActivate: (g: CellGesture) => void = () => undefined;
 
   private impl: MapImpl | null = null;
   private radius = -1;
@@ -48,6 +50,7 @@ export class HexMap {
   private destroyed = false;
   private readonly preview: boolean;
   private rosterArgs: [PublicPlayer[], number | null] | null = null;
+  private marks: OrderMark[] = [];
 
   constructor(opts: { preview?: boolean } = {}) {
     this.preview = !!opts.preview;
@@ -95,6 +98,8 @@ export class HexMap {
     this.impl = impl;
     impl.onHover = (h) => this.onHover(h);
     impl.onSelect = (h) => this.onSelect(h);
+    impl.onMenu = (g) => this.onMenu(g);
+    impl.onActivate = (g) => this.onActivate(g);
     this.el.classList.remove('loading');
     this.el.classList.toggle('is-3d', !(impl instanceof SvgHexMap));
     this.el.appendChild(impl.el);
@@ -102,6 +107,7 @@ export class HexMap {
     if (this.input) impl.render(this.input);
     if (this.pendingSelected) impl.setSelected(this.pendingSelected);
     if (this.rosterArgs) impl.setRoster?.(...this.rosterArgs);
+    if (this.marks.length) impl.setOrders?.(this.marks);
     // A board that dies later (e.g. the WebGL context cannot be restored) falls back too.
     this.el.addEventListener('board-failed', () => this.fallback(impl), { once: true });
   }
@@ -162,6 +168,36 @@ export class HexMap {
 
   shake(pid: number): void {
     this.impl?.shake(pid);
+  }
+
+  hint(kind: BoardAction | null, at: Hex | null): void {
+    this.impl?.hint(kind, at);
+  }
+
+  hop(at: Hex): void {
+    this.impl?.hop(at);
+  }
+
+  deny(at: Hex): void {
+    this.impl?.deny(at);
+  }
+
+  /** Blitz: your queued orders as ghosts on the board. */
+  setOrders(marks: OrderMark[]): void {
+    this.marks = marks;
+    this.impl?.setOrders?.(marks);
+  }
+
+  /** Blitz replay: a shot into a cell (boards without a dedicated effect use a plain shot). */
+  strike(from: Hex, to: Hex, hit: boolean, power: number): void {
+    if (!this.impl) return;
+    if (this.impl.strike) this.impl.strike(from, to, hit, power);
+    else this.impl.shot(from, to, 'attack');
+  }
+
+  /** Blitz replay: a bounced move. */
+  bounce(pid: number, toward: Hex): void {
+    this.impl?.bounce?.(pid, toward);
   }
 
   /** Frees the WebGL context and every GPU resource; call when the game screen closes. */

@@ -34,8 +34,9 @@ import {
   Vector3,
 } from 'three';
 import type { Hex } from '../../../shared/hex.ts';
+import { t } from '../i18n.ts';
 import { flagArt } from './textures.ts';
-import { clamp01, ease, type Palette, shortName, TILE_TOP } from './util.ts';
+import { clamp01, ease, initials, type Palette, shortName, TILE_TOP } from './util.ts';
 
 export const FLAG_W = 0.8;
 export const FLAG_H = 0.6;
@@ -214,7 +215,16 @@ export class Piece {
   private readonly star: Mesh;
   readonly label: HTMLDivElement;
   private readonly nameEl: HTMLSpanElement;
+  private readonly iniEl: HTMLSpanElement;
   private readonly hpEl: HTMLSpanElement;
+  /** Blitz: the public charge badge ("ϟ+2"). */
+  private readonly chargeEl: HTMLSpanElement;
+  chargeLevel = 0;
+  /** Label collision avoidance (board.ts): 'full' name, 'mini' initials or a 'dot'. */
+  labelMode: 'full' | 'mini' | 'dot' = 'full';
+  /** Cached label sizes (px) for 'full' and 'mini'; re-measured when `labelDirty`. */
+  labelSize = { fw: 0, fh: 0, mw: 0, mh: 0 };
+  labelDirty = true;
   private readonly baseMat: MeshStandardMaterial;
   private readonly bandMat: MeshStandardMaterial;
   private readonly poleMat: MeshStandardMaterial;
@@ -294,10 +304,16 @@ export class Piece {
     this.label = document.createElement('div');
     this.label.className = 'b3-label';
     this.nameEl = document.createElement('span');
+    this.nameEl.className = 'b3-name';
+    this.iniEl = document.createElement('span');
+    this.iniEl.className = 'b3-ini';
     this.hpEl = document.createElement('span');
     this.hpEl.className = 'b3-hp';
     this.hpEl.hidden = true;
-    this.label.append(this.nameEl, this.hpEl);
+    this.chargeEl = document.createElement('span');
+    this.chargeEl.className = 'b3-charge';
+    this.chargeEl.hidden = true;
+    this.label.append(this.nameEl, this.iniEl, this.hpEl, this.chargeEl);
     this.style(false);
   }
 
@@ -308,19 +324,39 @@ export class Piece {
     if (n === this.nick) return;
     this.nick = n;
     this.nameEl.textContent = shortName(n);
+    this.iniEl.textContent = initials(n);
+    this.labelDirty = true;
   }
 
   setHp(hp: number | null): void {
     if (hp === null || !this.me) {
+      if (!this.hpEl.hidden) this.labelDirty = true;
       this.hpEl.hidden = true;
       return;
     }
+    if (this.hpEl.hidden) this.labelDirty = true;
     this.hpEl.hidden = false;
     const n = Math.max(0, Math.round(hp));
     const txt = n <= 6 ? '●'.repeat(n) || '○' : `♥ ${n}`;
-    if (this.hpEl.textContent !== txt) this.hpEl.textContent = txt;
-    this.hpEl.title = `${n} HP`;
+    if (this.hpEl.textContent !== txt) {
+      this.hpEl.textContent = txt;
+      this.labelDirty = true;
+    }
+    this.hpEl.title = t('unit.hp', { n });
     this.hpEl.classList.toggle('low', n <= 1);
+  }
+
+  /** Blitz: shows the player's charge (public) as a badge and a hotter glow ring. */
+  setCharge(n: number): void {
+    const v = Math.max(0, Math.round(n));
+    if (v === this.chargeLevel) return;
+    this.chargeLevel = v;
+    this.chargeEl.hidden = v === 0;
+    this.chargeEl.textContent = v ? `ϟ+${v}` : '';
+    this.chargeEl.dataset.level = String(v);
+    this.label.classList.toggle('charged', v > 0);
+    this.labelDirty = true;
+    this.applyGlow(1);
   }
 
   /** Loads the flag; resolves true when the texture landed (for a redraw). */
@@ -370,6 +406,7 @@ export class Piece {
     this.bandMat.emissive.copy(this.flagColor);
     this.star.visible = me;
     this.finial.visible = !me;
+    if (this.label.classList.contains('me') !== me) this.labelDirty = true;
     this.label.classList.toggle('me', me);
     this.root.renderOrder = me ? 1 : 0;
     this.glowBase = me ? 1 : 0.55;
@@ -381,6 +418,8 @@ export class Piece {
   applyGlow(k: number): void {
     const c = this.glowMat.color.copy(this.flagColor);
     if (this.me) c.lerp(this.C.brassHi, 0.45);
+    // a charged piece glows hot: towards ember red, brighter with each level
+    if (this.chargeLevel > 0) c.lerp(this.C.danger, Math.min(0.75, 0.3 + this.chargeLevel * 0.15)).multiplyScalar(1 + this.chargeLevel * 0.55);
     c.multiplyScalar(this.glowBase * k * (this.dieT >= 0 ? 0 : 1));
   }
 
@@ -437,6 +476,7 @@ export class Piece {
     const a = this.phase * 3.1;
     this.dieDir.set(Math.cos(a), Math.sin(a));
     this.label.classList.add('dead');
+    this.labelDirty = true;
     if (reduced) this.dieT = 0.999;
   }
 

@@ -42,6 +42,7 @@ export class RecordingSink implements Sink {
   userId: number;
   username: string;
   lastState?: string;
+  visible?: boolean;
   messages: ServerMessage[] = [];
   constructor(user: { id: number; username: string }) {
     this.userId = user.id;

@@ -99,6 +99,9 @@ export class RoomManager {
       next_tick_at: null,
       last_tick_at: null,
       winner_pid: null,
+      peace: null,
+      // Rooms made on a test-mode server never change ratings, even if the db is reused later.
+      rated: this.ctx.testMode ? 0 : 1,
     };
     const id = this.ctx.store.insertRoom(row);
     const room = new Room(this.ctx, { ...row, id }, [], []);
@@ -130,6 +133,8 @@ export class RoomManager {
       joined: me !== undefined,
       alive: me && room.phase !== 'lobby' ? me.alive : null,
       winner: winner?.nickname ?? null,
+      mode: room.settings.mode,
+      ...(room.settings.mode === 'blitz' ? { blitzTurnSec: room.settings.blitzTurnSec } : {}),
     };
   }
 

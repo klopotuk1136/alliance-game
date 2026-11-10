@@ -8,6 +8,7 @@ import { Store } from './db.ts';
 import { AvatarStore, Profiles } from './profile.ts';
 import { FLAG_CODES } from './flags.ts';
 import { createHttpServer } from './http.ts';
+import { generateVapidKeys, loadVapidKeys, PushService, webPushSender } from './push.ts';
 import { RoomManager } from './rooms.ts';
 import { StickerLibrary } from './stickers.ts';
 import { attachWebSocket } from './ws.ts';
@@ -40,6 +41,22 @@ const stickers = new StickerLibrary(opts.stickersDir, log);
 stickers.scan();
 stickers.watch();
 const now = (): number => Date.now();
+// Web Push: keys from VAPID_* env vars, else the db (generated on the first start).
+const generated = await generateVapidKeys().catch(() => null);
+const vapid = loadVapidKeys(store, process.env, () => {
+  if (!generated) throw new Error('web-push is not installed');
+  return generated;
+});
+const vapidSubject = process.env.VAPID_SUBJECT ?? 'mailto:push@alliance-game.app';
+let rooms: RoomManager;
+const push = new PushService({
+  store,
+  keys: vapid,
+  send: await webPushSender(vapid, vapidSubject),
+  now,
+  log,
+  room: (code) => rooms?.get(code),
+});
 const ctx = {
   store,
   now,
@@ -47,9 +64,10 @@ const ctx = {
   flagCodes: FLAG_CODES,
   log,
   stickers,
+  testMode: opts.testMode,
+  notify: push,
 };
 
-let rooms: RoomManager;
 try {
   rooms = new RoomManager(ctx, overrides);
 } catch (err) {
@@ -57,11 +75,12 @@ try {
   process.exit(1);
 }
 rooms.loadAll();
+push.watchLobbies(() => rooms.rooms.values());
 const auth = new Auth(store, now);
 const profiles = new Profiles(store, new AvatarStore(opts.avatarsDir), now);
 profiles.onAvatarChange = (userId) => rooms.refreshUser(userId);
 
-const server = createHttpServer({ auth, rooms, stickers, profiles, staticDir: opts.staticDir, trustProxy: opts.trustProxy, log });
+const server = createHttpServer({ auth, rooms, stickers, profiles, push, staticDir: opts.staticDir, trustProxy: opts.trustProxy, log });
 const wss = attachWebSocket(server, { auth, rooms, log });
 const admin = startAdminServer(opts.adminSocket, { rooms, auth, store, now, log });
 
@@ -79,6 +98,7 @@ server.listen(opts.port, opts.host, () => {
   log(`Database: ${opts.db}   rooms loaded: ${rooms.rooms.size}`);
   log(`Stickers: ${stickers.count} from ${stickers.dir}`);
   log(`Avatars: ${opts.avatarsDir}`);
+  log(`Push: VAPID keys from ${vapid.source === 'env' ? 'the environment' : vapid.source === 'db' ? 'the database' : 'a new pair saved in the database'}`);
   if (Object.keys(overrides).length) log(`Default overrides: ${JSON.stringify(overrides)}`);
 });
 
@@ -90,6 +110,7 @@ function shutdown(signal: string): void {
   for (const ws of wss.clients) ws.close(1012, 'Server restarting');
   admin.close();
   stickers.close();
+  push.close();
   server.close();
   store.close();
   setTimeout(() => process.exit(0), 200).unref();

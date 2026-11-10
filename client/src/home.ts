@@ -4,22 +4,34 @@ import { api } from './api.ts';
 import { h, replaceChildren, toast } from './dom.ts';
 import { countdown } from './format.ts';
 import { navigate } from './nav.ts';
+import { leaderboardLink } from './leaderboard.ts';
 import { profileHint, userMenu } from './profile.ts';
 import { emptyState, icon, logo } from './ui.ts';
+import { has, L, onLang, t, T } from './i18n.ts';
+import { langSwitch } from './lang-switch.ts';
+import { notifyBell } from './notify-panel.ts';
+import { tutorialCard } from './tutorial.ts';
 
-const PHASE_LABEL: Record<string, string> = {
-  lobby: 'Lobby',
-  running: 'In progress',
-  paused: 'Paused',
-  finished: 'Finished',
-};
+function phaseLabel(phase: string): string {
+  const key = `home.phase.${phase}`;
+  return has(key) ? t(key) : phase;
+}
+
+/** "Blitz · 60 s" on blitz rooms (the turn length in minutes when it is a whole number of them). */
+function blitzBadge(sec: number | undefined): HTMLElement {
+  const s = sec ?? 60;
+  const whole = s >= 60 && s % 60 === 0;
+  const label = whole ? t('home.blitzMin', { n: s / 60 }) : t('home.blitzSec', { n: s });
+  const time = whole ? t('home.turnMin', { n: s / 60 }) : t('home.turnSec', { n: s });
+  return h('span', { class: 'badge blitz-badge', title: t('home.blitzTitle', { time }) }, icon('bolt'), label);
+}
 
 /** Home: create a room, your rooms, open lobbies. */
 export function showHome(app: HTMLElement, user: UserInfo): () => void {
   const mineList = h('div', { class: 'room-list' }, h('div', { class: 'skeleton' }));
   const openList = h('div', { class: 'room-list' }, h('div', { class: 'skeleton' }));
-  const nameInput = h('input', { placeholder: 'e.g. Friday night betrayal', maxlength: ROOM_NAME_MAX, required: true, 'aria-label': 'Room name' });
-  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Create room');
+  const nameInput = h('input', { placeholder: L('home.roomNamePlaceholder'), maxlength: ROOM_NAME_MAX, required: true, 'aria-label': L('home.roomName') });
+  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('plus'), T('home.createRoomBtn'));
   let serverOffset = 0;
   let data: RoomsResponse | null = null;
 
@@ -40,13 +52,13 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
   function roomCard(r: RoomSummary, open: boolean): HTMLElement {
     let status = '';
     if (r.phase === 'lobby') {
-      status = r.lobbyEndsAt ? `starts in ${countdown(r.lobbyEndsAt - (Date.now() + serverOffset))}` : 'waiting for creator';
+      status = r.lobbyEndsAt ? t('home.startsIn', { time: countdown(r.lobbyEndsAt - (Date.now() + serverOffset)) }) : t('home.waitingCreator');
     } else if (r.phase === 'finished') {
-      status = r.winner ? `winner: ${r.winner}` : 'finished';
+      status = r.winner ? t('home.winner', { name: r.winner }) : t('home.finished');
     } else if (r.alive === false) {
-      status = 'you are out';
+      status = t('home.youAreOut');
     } else if (r.alive) {
-      status = 'you are alive';
+      status = t('home.youAreAlive');
     }
     return h(
       'a',
@@ -66,7 +78,7 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
         h(
           'span',
           { class: 'room-card-meta' },
-          h('span', null, `by ${r.creator}`),
+          h('span', null, t('home.by', { name: r.creator })),
           h('span', { class: 'dot-sep', 'aria-hidden': 'true' }),
           h('span', { class: 'num' }, icon('users'), `${r.players}/${r.maxPlayers}`),
           status ? [h('span', { class: 'dot-sep', 'aria-hidden': 'true' }), h('span', { class: 'num' }, status)] : null,
@@ -75,18 +87,19 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
       h(
         'div',
         { class: 'room-card-side' },
-        h('span', { class: `badge ${r.phase}` }, PHASE_LABEL[r.phase]),
-        open ? h('span', { class: 'btn small secondary' }, 'Open') : icon('chevron', 'room-go'),
+        r.mode === 'blitz' ? blitzBadge(r.blitzTurnSec) : null,
+        h('span', { class: `badge ${r.phase}` }, phaseLabel(r.phase)),
+        open ? h('span', { class: 'btn small secondary' }, t('home.open')) : icon('chevron', 'room-go'),
       ),
     );
   }
 
   function render(): void {
     if (!data) return;
-    replaceChildren(mineList, data.mine.length ? data.mine.map((r) => roomCard(r, false)) : emptyState("You haven't joined any rooms yet", 'Create one above, or open a lobby a friend shared.'));
+    replaceChildren(mineList, data.mine.length ? data.mine.map((r) => roomCard(r, false)) : emptyState(t('home.noRoomsTitle'), t('home.noRoomsText')));
     replaceChildren(
       openList,
-      data.open.length ? data.open.map((r) => roomCard(r, true)) : emptyState('No open lobbies right now', 'Create one and share the link. Every alliance starts with an invitation.'),
+      data.open.length ? data.open.map((r) => roomCard(r, true)) : emptyState(t('home.noLobbiesTitle'), t('home.noLobbiesText')),
     );
   }
 
@@ -110,6 +123,9 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
         { class: 'topbar' },
         logo(true),
         h('div', { class: 'spacer' }),
+        leaderboardLink(),
+        notifyBell(),
+        langSwitch(),
         userMenu(user),
       ),
       h(
@@ -119,13 +135,14 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
         h(
           'section',
           { class: 'card framed create-card' },
-          h('p', { class: 'eyebrow' }, 'New campaign'),
-          h('h1', { class: 'display' }, 'Create a room'),
-          h('p', { class: 'muted' }, 'You get a link to share with your friends. The game starts when the lobby time runs out (24 hours), or earlier when you start it.'),
+          h('p', { class: 'eyebrow' }, T('home.eyebrow')),
+          h('h1', { class: 'display' }, T('home.createTitle')),
+          h('p', { class: 'muted' }, T('home.createText')),
           createForm,
         ),
-        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, 'Your rooms'), mineList),
-        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, 'Open lobbies'), openList),
+        tutorialCard(),
+        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, T('home.yourRooms')), mineList),
+        h('section', { class: 'home-section' }, h('h2', { class: 'section-title' }, T('home.openLobbies')), openList),
       ),
     ),
   );
@@ -133,7 +150,9 @@ export function showHome(app: HTMLElement, user: UserInfo): () => void {
   void load();
   const poll = setInterval(() => void load(), 5000);
   const tick = setInterval(render, 1000);
+  const offLang = onLang(render);
   return () => {
+    offLang();
     clearInterval(poll);
     clearInterval(tick);
   };

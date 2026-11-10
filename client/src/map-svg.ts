@@ -5,7 +5,9 @@
 import { gridCells, hexCorners, hexDistance, hexKey, hexToPixel, type Hex } from '../../shared/hex.ts';
 import type { PublicPlayer } from '../../shared/protocol.ts';
 import { s } from './dom.ts';
-import type { MapImpl, MapInput } from './map-types.ts';
+import { L } from './i18n.ts';
+import type { BoardAction, CellGesture, MapImpl, MapInput, OrderMark } from './map-types.ts';
+import { LONG_PRESS_MS, pressRing, type PressRing } from './press-ring.ts';
 
 const SIZE = 32;
 const FLAG_R = SIZE * 0.45;
@@ -31,23 +33,40 @@ export class SvgHexMap implements MapImpl {
   selected: Hex | null = null;
   onHover: (h: Hex | null) => void = () => undefined;
   onSelect: (h: Hex | null) => void = () => undefined;
+  onMenu: (g: CellGesture) => void = () => undefined;
+  onActivate: (g: CellGesture) => void = () => undefined;
 
   private readonly cellLayer: SVGGElement;
   private readonly tokenLayer: SVGGElement;
   private readonly fxLayer: SVGGElement;
+  /** Blitz: ghosts of the queued orders. */
+  private readonly orderLayer: SVGGElement;
+  private ordersKey = '';
   private readonly cells = new Map<string, { hex: Hex; poly: SVGPolygonElement }>();
   private readonly tokens = new Map<number, Token>();
   private radius = -1;
+  private myPid: number | null = null;
+  private myPos: Hex | null = null;
+  private range = 0;
+  private lastTap = { t: 0, key: '', x: 0, y: 0, hex: null as Hex | null };
+  /** time of the latest pointerdown: a double counts from the first release to the second press */
+  private downAt = 0;
+  private press: { id: number; x: number; y: number; hex: Hex; timer: number; ring: PressRing } | null = null;
+  /** a long-press just opened the menu: swallow the click that follows the lift */
+  private swallowClick = false;
+  private previewKey = '';
 
   constructor() {
     this.cellLayer = s('g', { class: 'cells' });
     this.tokenLayer = s('g', { class: 'tokens' });
     this.fxLayer = s('g', { class: 'fx' });
+    this.orderLayer = s('g', { class: 'orders' });
     this.el = s(
       'svg',
-      { class: 'hexmap', role: 'img', 'aria-label': 'Game map' },
+      { class: 'hexmap', role: 'img', 'aria-label': L('board.gameMap') },
       s('defs', null, s('clipPath', { id: 'tok-clip', clipPathUnits: 'objectBoundingBox' }, s('circle', { cx: 0.5, cy: 0.5, r: 0.5 }))),
       this.cellLayer,
+      this.orderLayer,
       this.tokenLayer,
       this.fxLayer,
     );
@@ -61,12 +80,83 @@ export class SvgHexMap implements MapImpl {
       if (hex) this.setHover(hex);
     });
     this.el.addEventListener('pointerleave', () => this.setHover(null));
+    // Same mapping as the 3D board: click selects, a second click on the same cell within
+    // the window = activate (move), right-click / long-press = the action menu.
     this.el.addEventListener('click', (ev) => {
+      if (this.swallowClick) {
+        this.swallowClick = false;
+        return;
+      }
       const hex = cellFrom(ev.target);
       if (!hex) return;
-      const same = this.selected && hexKey(this.selected) === hexKey(hex);
+      const key = hexKey(hex);
+      const touch = (ev as PointerEvent).pointerType === 'touch' || (ev as PointerEvent).pointerType === 'pen';
+      const now = ev.timeStamp || performance.now();
+      const lt = this.lastTap;
+      const gap = Math.hypot(ev.clientX - lt.x, ev.clientY - lt.y);
+      // 350 ms on touch (late events on real phones); a near miss on the neighbour counts for the first cell
+      const sameTarget = lt.key === key || (touch && gap < 24 && lt.hex !== null);
+      if (lt.t && (this.downAt || now) - lt.t < (touch ? 350 : 450) && sameTarget && gap < (touch ? 36 : 12)) {
+        const target = lt.hex ?? hex;
+        this.lastTap.t = 0;
+        if (!this.selected || hexKey(this.selected) !== hexKey(target)) this.setSelected(target);
+        this.onActivate({ hex: target, x: ev.clientX, y: ev.clientY, touch });
+        return;
+      }
+      this.lastTap = { t: now, key, x: ev.clientX, y: ev.clientY, hex };
+      const same = this.selected && hexKey(this.selected) === key;
       this.setSelected(same ? null : hex);
     });
+    this.el.addEventListener('dblclick', (ev) => ev.preventDefault());
+    this.el.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      // touch long-press is handled by the timer below (some browsers also send contextmenu)
+      if (this.press || this.swallowClick) return;
+      const hex = cellFrom(ev.target);
+      if (!hex) return;
+      this.lastTap.t = 0;
+      if (!this.selected || hexKey(this.selected) !== hexKey(hex)) this.setSelected(hex);
+      this.onMenu({ hex, x: ev.clientX, y: ev.clientY, touch: false });
+    });
+    this.el.addEventListener('pointerdown', (ev) => {
+      this.downAt = ev.timeStamp;
+      if (ev.pointerType === 'mouse') return;
+      if (this.press) {
+        this.endPress(false); // a second finger: pinch/zoom, not a press
+        return;
+      }
+      const hex = cellFrom(ev.target);
+      if (!hex) return;
+      const { pointerId: id, clientX: x, clientY: y } = ev;
+      const timer = window.setTimeout(() => requestAnimationFrame(() => {
+        // (after a frame: a queued drag / second finger cancels first)
+        if (!this.press || this.press.id !== id) return;
+        this.endPress(true);
+        this.swallowClick = true;
+        setTimeout(() => (this.swallowClick = false), 700);
+        this.lastTap.t = 0;
+        if (!this.selected || hexKey(this.selected) !== hexKey(hex)) this.setSelected(hex);
+        this.onMenu({ hex, x, y, touch: true });
+      }), LONG_PRESS_MS);
+      this.press = { id, x, y, hex, timer, ring: pressRing(x, y) };
+    });
+    this.el.addEventListener('pointermove', (ev) => {
+      const p = this.press;
+      if (p && p.id === ev.pointerId && Math.hypot(ev.clientX - p.x, ev.clientY - p.y) > 12) this.endPress(false);
+    });
+    const lift = (ev: PointerEvent): void => {
+      if (this.press?.id === ev.pointerId) this.endPress(false);
+    };
+    this.el.addEventListener('pointerup', lift);
+    this.el.addEventListener('pointercancel', lift);
+  }
+
+  private endPress(fired: boolean): void {
+    const p = this.press;
+    if (!p) return;
+    this.press = null;
+    clearTimeout(p.timer);
+    p.ring.end(fired);
   }
 
   px(h: Hex): { x: number; y: number } {
@@ -109,6 +199,9 @@ export class SvgHexMap implements MapImpl {
 
   render(input: MapInput): void {
     const { myPos, range, showRange } = input;
+    this.myPid = input.myPid;
+    this.myPos = myPos;
+    this.range = range;
     for (const { hex, poly } of this.cells.values()) {
       const d = myPos ? hexDistance(myPos, hex) : -1;
       poly.classList.toggle('in-range', showRange && d > 0 && d <= range);
@@ -185,6 +278,25 @@ export class SvgHexMap implements MapImpl {
     this.fx(s('circle', { class: `impact ${kind}`, cx: b.x, cy: b.y + FLAG_Y, r: FLAG_R + 4 }), 900);
   }
 
+  /** Blitz: dashed lines and target rings for the queued orders (the 3D board draws arcs). */
+  setOrders(marks: OrderMark[]): void {
+    const key = JSON.stringify(marks);
+    if (key === this.ordersKey) return;
+    this.ordersKey = key;
+    this.orderLayer.textContent = '';
+    for (const m of marks) {
+      const a = this.px(m.from);
+      const b = this.px(m.to);
+      if (m.kind === 'upgrade' || m.kind === 'charge') {
+        this.orderLayer.appendChild(s('circle', { class: `order-ring ${m.kind}`, cx: a.x, cy: a.y, r: SIZE * (m.kind === 'upgrade' ? 0.95 : 0.75) }));
+        continue;
+      }
+      this.orderLayer.appendChild(s('line', { class: `order-line ${m.kind}`, x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
+      this.orderLayer.appendChild(s('circle', { class: `order-ring ${m.kind}`, cx: b.x, cy: b.y, r: SIZE * 0.62 }));
+      if (m.label) this.orderLayer.appendChild(s('text', { class: `order-label ${m.kind}`, x: b.x, y: b.y - SIZE * 0.7 }, m.label));
+    }
+  }
+
   float(at: Hex, text: string, kind: 'good' | 'bad' | 'info'): void {
     const p = this.px(at);
     this.fx(s('text', { class: `float ${kind}`, x: p.x, y: p.y - SIZE * 0.55 }, text), 1400);
@@ -208,7 +320,36 @@ export class SvgHexMap implements MapImpl {
     setTimeout(() => t.inner.classList.remove('shake'), 600);
   }
 
+  hint(kind: BoardAction | null, at: Hex | null): void {
+    const k = kind ? `${kind}:${at ? hexKey(at) : ''}` : '';
+    if (k === this.previewKey) return;
+    this.previewKey = k;
+    if (!kind) return;
+    const target = kind === 'upgrade' || kind === 'charge' ? this.myPos : at;
+    if (!target) return;
+    const p = this.px(target);
+    const r = kind === 'upgrade' ? SIZE * (0.6 + this.range * 1.5) : SIZE * 0.55;
+    this.fx(s('circle', { class: `ring hint ${kind}`, cx: p.x, cy: p.y, r }), 700);
+  }
+
+  hop(at: Hex): void {
+    const p = this.px(at);
+    this.fx(s('circle', { class: 'ring hint move', cx: p.x, cy: p.y, r: SIZE * 0.6 }), 700);
+    const t = this.myPid !== null ? this.tokens.get(this.myPid) : undefined;
+    if (t) {
+      t.inner.classList.remove('hop');
+      requestAnimationFrame(() => t.inner.classList.add('hop'));
+      setTimeout(() => t.inner.classList.remove('hop'), 450);
+    }
+  }
+
+  deny(at: Hex): void {
+    this.flashCell(at);
+    if (this.myPid !== null) this.shake(this.myPid);
+  }
+
   destroy(): void {
+    this.endPress(false);
     this.el.remove();
   }
 

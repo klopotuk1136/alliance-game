@@ -11,7 +11,10 @@ import type { RoomManager } from './rooms.ts';
 import type { StickerLibrary } from './stickers.ts';
 import type { UserRow } from './db.ts';
 import { ProfileError, type Profiles } from './profile.ts';
+import { PushInputError, type PushService } from './push.ts';
 import { AVATAR_MAX_BYTES } from '../shared/profile.ts';
+import type { LeaderboardResponse } from '../shared/protocol.ts';
+import { errorFields } from '../shared/errors.ts';
 
 export interface HttpDeps {
   auth: Auth;
@@ -20,6 +23,8 @@ export interface HttpDeps {
   stickers?: StickerLibrary;
   /** Player profiles; without it /api/profile* is 404 and /api/me has no profile. */
   profiles?: Profiles;
+  /** Web Push; without it /api/push/* is 404. */
+  push?: PushService;
   staticDir: string;
   /** Behind a reverse proxy (Railway, nginx...): take the client IP from X-Forwarded-For. */
   trustProxy?: boolean;
@@ -144,6 +149,7 @@ export function createHttpServer(deps: HttpDeps): Server {
   const authLimiter = new RateLimiter(30, 10 * 60 * 1000);
   const avatarLimiter = new RateLimiter(12, 10 * 60 * 1000);
   const profileLimiter = new RateLimiter(60, 10 * 60 * 1000);
+  const pushLimiter = new RateLimiter(40, 10 * 60 * 1000);
   const staticRoot = resolve(deps.staticDir);
 
   function requireUser(req: IncomingMessage): UserRow {
@@ -206,6 +212,27 @@ export function createHttpServer(deps: HttpDeps): Server {
         throw new HttpError(400, 'Bad username');
       }
       return sendJson(res, 200, { profile: deps.profiles.byUsername(name) });
+    }
+    if (deps.push && path.startsWith('/api/push/')) {
+      const push = deps.push;
+      if (method === 'GET' && path === '/api/push/key') return sendJson(res, 200, { publicKey: push.publicKey });
+      const user = requireUser(req);
+      if (!pushLimiter.allow(`u${user.id}`)) throw new HttpError(429, 'Too many changes, try again in a few minutes');
+      if (path === '/api/push/subscribe' && method === 'POST') {
+        const body = await readJson(req);
+        push.subscribe(user.id, body.subscription, body.lang, body.prefs);
+        return sendJson(res, 200, { ok: true });
+      }
+      if (path === '/api/push/subscribe' && method === 'DELETE') {
+        const body = await readJson(req);
+        return sendJson(res, 200, { ok: push.unsubscribe(user.id, body.endpoint) });
+      }
+      if (path === '/api/push/test' && method === 'POST') return sendJson(res, 200, { sent: push.test(user.id) });
+      throw new HttpError(404, 'Not found');
+    }
+    if (method === 'GET' && path === '/api/leaderboard') {
+      requireUser(req);
+      return sendJson(res, 200, { players: deps.rooms.store.leaderboard() } satisfies LeaderboardResponse);
     }
     if (method === 'GET' && path === '/api/rooms') {
       const user = requireUser(req);
@@ -352,10 +379,10 @@ export function createHttpServer(deps: HttpDeps): Server {
         res.destroy();
         return;
       }
-      if (err instanceof HttpError || err instanceof AuthError || err instanceof ProfileError) return sendJson(res, err.status, { error: err.message });
-      if (err instanceof RoomError) return sendJson(res, 400, { error: err.message });
+      if (err instanceof HttpError || err instanceof AuthError || err instanceof ProfileError) return sendJson(res, err.status, { error: err.message, ...errorFields(err.message) });
+      if (err instanceof RoomError || err instanceof PushInputError) return sendJson(res, 400, { error: err.message, ...errorFields(err.message) });
       deps.log(`HTTP ${req.method} ${path} failed: ${(err as Error).stack ?? err}`);
-      sendJson(res, 500, { error: 'Server error' });
+      sendJson(res, 500, { error: 'Server error', code: 'serverError' });
     });
   });
 }

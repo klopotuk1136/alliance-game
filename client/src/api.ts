@@ -4,7 +4,9 @@
 // same machine can be logged in as different players. A copy in localStorage lets a
 // freshly opened tab start out logged in as the last account used.
 
+import type { ErrorInfo } from '../../shared/errors.ts';
 import type { FlagInfo, MeResponse } from '../../shared/protocol.ts';
+import { errorText } from './errors.ts';
 
 const SESSION_KEY = 'alliance.token';
 const LAST_KEY = 'alliance.lastToken';
@@ -41,9 +43,15 @@ export function clearToken(): void {
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** The server's English message; `message` is it in the current language. */
+  readonly english: string;
+  readonly info: ErrorInfo;
+  constructor(status: number, message: string, info: ErrorInfo = {}) {
     super(message);
     this.status = status;
+    this.english = message;
+    this.info = info;
+    Object.defineProperty(this, 'message', { get: () => errorText(this.english, this.info), configurable: true });
   }
 }
 
@@ -59,8 +67,8 @@ export async function api<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: 
   } catch {
     throw new ApiError(0, "Can't reach the server");
   }
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new ApiError(res.status, data.error ?? `Request failed (${res.status})`);
+  const data = (await res.json().catch(() => ({}))) as { error?: string } & ErrorInfo;
+  if (!res.ok) throw new ApiError(res.status, data.error ?? `Request failed (${res.status})`, { code: data.code, params: data.params });
   return data as T;
 }
 

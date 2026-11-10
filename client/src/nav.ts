@@ -1,4 +1,5 @@
 import { clearToken } from './api.ts';
+import { forgetDevice } from './notify.ts';
 
 let router: () => void = () => undefined;
 
@@ -13,6 +14,7 @@ export function navigate(path: string): void {
 
 /** Logs this tab out (other tabs keep their own login). */
 export function logout(): void {
+  forgetDevice();
   clearToken();
   router();
 }

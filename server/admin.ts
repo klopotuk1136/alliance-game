@@ -9,7 +9,7 @@ import type { Store } from './db.ts';
 import { RoomError, type Room } from './room.ts';
 import type { RoomManager } from './rooms.ts';
 import type { LogEntry } from '../shared/protocol.ts';
-import { revealEntry } from './views.ts';
+import { parsePeace, revealEntry } from './views.ts';
 
 export interface AdminDeps {
   rooms: RoomManager;
@@ -95,10 +95,17 @@ function nextEventText(room: Room, now: number): string {
   if (room.phase === 'lobby') {
     return room.row.lobby_ends_at === null ? 'lobby: waiting for creator' : `lobby ends ${fmtTime(room.row.lobby_ends_at, zone, now)}`;
   }
-  if (room.phase === 'running') return `next AP ${fmtTime(room.row.next_tick_at, zone, now)}`;
-  if (room.phase === 'paused') return `paused ${fmtTime(room.row.paused_at, zone, now)}`;
+  const peace = parsePeace(room.row.peace);
+  const alive = [...room.players.values()].filter((p) => p.alive).length;
+  const peaceText = peace && !peace.signed ? `; peace proposed by ${nameOf(room, peace.proposer)}, ${peace.signers.length}/${alive} signed` : '';
+  if (room.phase === 'running' && room.blitz) {
+    return `blitz turn ${room.blitz.turn} (${room.blitz.confirmed.length} confirmed) ends ${fmtTime(room.row.next_tick_at, zone, now)}${peaceText}`;
+  }
+  if (room.phase === 'running') return `next AP ${fmtTime(room.row.next_tick_at, zone, now)}${peaceText}`;
+  if (room.phase === 'paused') return `paused ${fmtTime(room.row.paused_at, zone, now)}${peaceText}`;
+  if (peace?.signed) return `peace signed: ${peace.signers.map((pid) => nameOf(room, pid)).join(', ')}${room.rated ? '' : ' (unrated)'}`;
   const winner = room.row.winner_pid !== null ? room.players.get(room.row.winner_pid)?.nickname : undefined;
-  return `winner: ${winner ?? '-'}`;
+  return `winner: ${winner ?? '-'}${room.rated ? '' : ' (unrated)'}`;
 }
 
 function roomsTable(deps: AdminDeps): string {
@@ -149,7 +156,16 @@ function historyLine(room: Room, e: LogEntry, now: number): string {
     case 'resume':
       return `${t}  resumed`;
     case 'finish':
+      if (e.pids) return `${t}  game over: peace signed by ${e.pids.map((pid) => nameOf(room, pid)).join(', ')}`;
       return `${t}  game over, winner: ${e.target !== undefined ? tg : '-'}`;
+    case 'peace-propose':
+      return `${t}  ${a} proposed peace`;
+    case 'peace-sign':
+      return `${t}  ${a} signed the peace`;
+    case 'peace-decline':
+      return `${t}  ${a} declined the peace`;
+    case 'peace-cancel':
+      return `${t}  peace cancelled by ${a}'s attack`;
     case 'adjust':
       return `${t}  admin changed ${tg}'s stats`;
     default:
@@ -244,8 +260,9 @@ export async function runAdminCommand(deps: AdminDeps, argv: string[]): Promise<
       const lines = store.chatAll(room.row.id, count).map((m) => {
         const t = fmtTime(m.ts, room.settings.timezone, now).split(' (')[0];
         const from = room.players.get(m.from)?.nickname ?? m.fromName;
-        const to = m.to === null ? 'all' : nameOf(room, m.to);
-        return `${t}  ${from} -> ${to}: ${m.sticker ? `[sticker ${m.sticker}]` : m.text.replace(/\n/g, ' / ')}`;
+        const to = m.group !== undefined ? `group #${m.group}` : m.to === null ? 'all' : nameOf(room, m.to);
+        const body = m.sys ? `[${m.sys.kind}${m.sys.name ? ` "${m.sys.name}"` : ''}]` : m.sticker ? `[sticker ${m.sticker}]` : m.text.replace(/\n/g, ' / ');
+        return `${t}  ${from} -> ${to}: ${body}`;
       });
       return lines.length ? lines.join('\n') : 'No messages yet.';
     }
@@ -255,11 +272,14 @@ export async function runAdminCommand(deps: AdminDeps, argv: string[]): Promise<
       if (users.length === 0) return 'No users yet.';
       const now = deps.now();
       return table([
-        ['ID', 'USERNAME', 'CREATED', 'ROOMS'],
+        ['ID', 'USERNAME', 'CREATED', 'RATING', 'RATED', 'WIN PTS', 'ROOMS'],
         ...users.map((u) => [
           u.id,
           u.username,
           fmtTime(u.created_at, 'UTC', now).split(' (')[0] + ' UTC',
+          Math.round(u.rating ?? 1000),
+          u.rated_games ?? 0,
+          Math.round((u.win_points ?? 0) * 100) / 100,
           [...rooms.rooms.values()].filter((r) => r.participantOf(u.id)).map((r) => r.code).join(' ') || '-',
         ]),
       ]);

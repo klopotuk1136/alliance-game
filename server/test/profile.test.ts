@@ -255,7 +255,7 @@ test('HTTP: /api/me, PATCH /api/profile, avatar upload/removal, public profiles,
     const pub = (await json<{ profile: PublicProfile & Record<string, unknown> }>(await fetch(`${base}/api/users/ERIN/profile`, { headers }))).profile;
     assert.deepEqual(
       { ...pub, joinedAt: 0 },
-      { username: 'erin', displayName: 'Erin', bio: null, telegram: 'erin_tg', avatarUrl: url, joinedAt: 0, games: 0, wins: 0 },
+      { username: 'erin', displayName: 'Erin', bio: null, telegram: 'erin_tg', avatarUrl: url, joinedAt: 0, games: 0, wins: 0, rating: 1000, ratedGames: 0, winPoints: 0 },
     );
     assert.equal((await fetch(`${base}/api/users/ghost/profile`, { headers })).status, 404);
 

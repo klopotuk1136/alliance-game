@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "flag-icons": "^7.6.0",
+    "web-push": "^4.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

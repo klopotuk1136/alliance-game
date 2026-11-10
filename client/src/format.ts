@@ -1,4 +1,5 @@
 import type { LogEntry } from '../../shared/protocol.ts';
+import { fmtDate, fmtList, fmtTime, t } from './i18n.ts';
 
 export function two(n: number): string {
   return String(n).padStart(2, '0');
@@ -11,52 +12,74 @@ export function countdown(ms: number): string {
   const hh = Math.floor((total % 86400) / 3600);
   const mm = Math.floor((total % 3600) / 60);
   const ss = total % 60;
-  if (d > 0) return `${d}d ${two(hh)}:${two(mm)}:${two(ss)}`;
+  if (d > 0) return `${t('unit.d', { n: d })} ${two(hh)}:${two(mm)}:${two(ss)}`;
   if (hh > 0) return `${two(hh)}:${two(mm)}:${two(ss)}`;
   return `${two(mm)}:${two(ss)}`;
 }
 
 export function clockTime(ts: number): string {
   const d = new Date(ts);
-  const now = new Date();
-  const time = `${two(d.getHours())}:${two(d.getMinutes())}`;
-  if (d.toDateString() === now.toDateString()) return `${time}:${two(d.getSeconds())}`;
-  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`;
+  if (d.toDateString() === new Date().toDateString()) return fmtTime(ts, true);
+  return `${fmtDate(ts)} ${fmtTime(ts)}`;
 }
 
 type NameFn = (pid: number | undefined) => string;
 
 /** Text for one line of the player's own log. */
 export function personalText(e: LogEntry, name: NameFn, myPid: number | null): string {
+  const n = e.amount ?? 1;
   switch (e.type) {
     case 'start':
-      return 'The game has started. Good luck!';
+      return t('log.start');
     case 'attack':
-      return `You attacked ${name(e.target)}.`;
+      // With public attacks you also see other players' attacks (they carry the attacker).
+      if (e.actor !== undefined && e.actor !== myPid) return t('log.attackOther', { actor: name(e.actor), target: name(e.target) });
+      return t('log.attackYou', { target: name(e.target) });
     case 'hit':
-      return `You were hit! −${e.amount ?? 1} HP`;
+      if (e.actor !== undefined) return t('log.hitBy', { actor: name(e.actor), n });
+      return t('log.hit', { n });
     case 'grant':
-      return `You gave ${e.amount ?? 1} AP to ${name(e.target)}.`;
+      if (e.actor !== undefined && e.actor !== myPid) return t('log.grantOther', { actor: name(e.actor), n, target: name(e.target) });
+      return t('log.grantYou', { n, target: name(e.target) });
     case 'granted':
-      return `Someone gave you ${e.amount ?? 1} AP.`;
+      if (e.actor !== undefined) return t('log.grantedBy', { actor: name(e.actor), n });
+      return t('log.granted', { n });
     case 'upgrade':
-      return `Your attack range is now ${e.value}.`;
+      return t('log.upgrade', { n: e.value ?? '?' });
     case 'eliminate': {
-      const by = e.actor === undefined ? 'the admin' : e.actor === myPid ? 'you' : name(e.actor);
-      if (e.target === myPid) return `You were eliminated by ${by}.`;
-      if (e.actor === myPid) return `You eliminated ${name(e.target)}!`;
-      return `${name(e.target)} was eliminated by ${by}.`;
+      const admin = e.actor === undefined;
+      if (e.target === myPid) return admin ? t('log.elimYouAdmin') : t('log.elimYouBy', { by: name(e.actor) });
+      if (e.actor === myPid) return t('log.elimByYou', { target: name(e.target) });
+      return admin ? t('log.elimAdmin', { target: name(e.target) }) : t('log.elimBy', { target: name(e.target), by: name(e.actor) });
     }
     case 'tick':
-      return `Everyone received ${e.amount ?? 1} AP.`;
+      return t('log.tick', { n });
     case 'pause':
-      return 'The game was paused.';
+      return t('log.pause');
     case 'resume':
-      return 'The game was resumed.';
+      return t('log.resume');
     case 'finish':
-      return e.target === undefined ? 'The game is over.' : e.target === myPid ? 'You won the game!' : `${name(e.target)} won the game!`;
+      if (e.pids) return t('log.finishPeace');
+      return e.target === undefined ? t('log.finishOver') : e.target === myPid ? t('log.finishYou') : t('log.finishWon', { name: name(e.target) });
     case 'adjust':
-      return 'An admin changed your stats.';
+      return t('log.adjust');
+    case 'peace-propose':
+      return e.actor === myPid ? t('log.proposeYou') : t('log.propose', { actor: name(e.actor) });
+    case 'peace-sign':
+      return e.actor === myPid ? t('log.signYou') : t('log.sign', { actor: name(e.actor) });
+    case 'peace-decline':
+      return e.actor === myPid ? t('log.declineYou') : t('log.decline', { actor: name(e.actor) });
+    case 'peace-cancel':
+      return t('log.cancel');
+    // blitz
+    case 'turn':
+      return t('log.turn', { turn: e.value ?? '?', hits: t('blitz.sum.hits', { n: e.amount ?? 0 }), misses: t('blitz.sum.misses', { n: e.extra ?? 0 }) });
+    case 'miss':
+      return e.actor !== undefined && e.actor !== myPid ? t('log.missOther', { actor: name(e.actor) }) : t('log.missYou', { n });
+    case 'gift-lost':
+      return e.actor !== undefined && e.actor !== myPid ? t('log.giftLostOther', { actor: name(e.actor) }) : t('log.giftLostYou', { n });
+    case 'charge':
+      return e.actor === myPid ? t('log.chargeYou', { n: e.value ?? 1 }) : t('log.charge', { actor: name(e.actor), n: e.value ?? 1 });
     default:
       return e.type;
   }
@@ -64,19 +87,33 @@ export function personalText(e: LogEntry, name: NameFn, myPid: number | null): s
 
 /** Text for one line of the full history shown after the game ends. */
 export function historyText(e: LogEntry, name: NameFn): string {
+  const n = e.amount ?? 1;
   switch (e.type) {
     case 'attack':
-      return `${name(e.actor)} attacked ${name(e.target)} (−${e.amount ?? 1} HP, ${e.value ?? '?'} left)`;
+      return t('log.h.attack', { actor: name(e.actor), target: name(e.target), n, left: e.value ?? '?' });
     case 'grant':
-      return `${name(e.actor)} gave ${e.amount ?? 1} AP to ${name(e.target)}`;
+      return t('log.h.grant', { actor: name(e.actor), n, target: name(e.target) });
     case 'upgrade':
-      return `${name(e.actor)} upgraded range to ${e.value}`;
+      return t('log.h.upgrade', { actor: name(e.actor), n: e.value ?? '?' });
     case 'eliminate':
-      return `${name(e.target)} was eliminated by ${e.actor === undefined ? 'the admin' : name(e.actor)}`;
+      return e.actor === undefined ? t('log.h.elimAdmin', { target: name(e.target) }) : t('log.h.elim', { target: name(e.target), by: name(e.actor) });
     case 'adjust':
-      return `Admin changed ${name(e.target)}'s stats`;
+      return t('log.h.adjust', { target: name(e.target) });
     case 'finish':
-      return e.target === undefined ? 'Game over' : `${name(e.target)} won`;
+      if (e.pids) return t('log.h.peace', { names: fmtList(e.pids.map((pid) => name(pid))) });
+      return e.target === undefined ? t('log.h.over') : t('log.h.won', { name: name(e.target) });
+    case 'peace-cancel':
+      return e.actor !== undefined ? t('log.h.cancelBy', { actor: name(e.actor) }) : t('log.h.cancel');
+    case 'peace-propose':
+      return t('log.h.propose', { actor: name(e.actor) });
+    case 'peace-sign':
+      return t('log.h.sign', { actor: name(e.actor) });
+    case 'peace-decline':
+      return t('log.h.decline', { actor: name(e.actor) });
+    case 'miss':
+      return t('log.h.miss', { actor: name(e.actor), n });
+    case 'gift-lost':
+      return t('log.h.giftLost', { actor: name(e.actor), n });
     default:
       return personalText(e, name, null);
   }
@@ -89,7 +126,17 @@ export function logKind(e: LogEntry): string {
       return 'bad';
     case 'granted':
     case 'tick':
+    case 'peace-sign':
       return 'good';
+    case 'peace-propose':
+      return 'peace';
+    case 'peace-decline':
+    case 'peace-cancel':
+      return 'bad';
+    case 'turn':
+      return 'turn';
+    case 'charge':
+      return 'charge';
     case 'finish':
     case 'start':
       return 'big';

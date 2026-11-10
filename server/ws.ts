@@ -5,6 +5,7 @@
 import type { Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ClientMessage, ServerMessage } from '../shared/protocol.ts';
+import { errorFields } from '../shared/errors.ts';
 import type { Auth } from './auth.ts';
 import { RoomError, type Room, type Sink } from './room.ts';
 import type { RoomManager } from './rooms.ts';
@@ -26,7 +27,7 @@ export function attachWebSocket(server: Server, deps: { auth: Auth; rooms: RoomM
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
     };
     const fatal = (message: string): void => {
-      send({ type: 'fatal', message });
+      send({ type: 'fatal', message, ...errorFields(message) });
       ws.close(4000, message.slice(0, 100));
     };
     const helloTimer = setTimeout(() => {
@@ -61,11 +62,35 @@ export function attachWebSocket(server: Server, deps: { auth: Auth; rooms: RoomM
           case 'ping':
             send({ type: 'pong', t: msg.t, serverNow: Date.now() });
             break;
+          case 'visibility':
+            c.visible = msg.visible !== false;
+            break;
           case 'act':
             c.room.act(c, c.userId, typeof msg.id === 'number' ? msg.id : 0, msg.action);
             break;
+          case 'orders':
+            c.room.orders(c.userId, msg.orders, msg.confirm, msg.turn);
+            break;
           case 'chat':
-            c.room.chat(c.userId, msg.to, msg.text, msg.sticker);
+            c.room.chat(c.userId, msg.to, msg.text, msg.sticker, msg.group);
+            break;
+          case 'group_create':
+            c.room.groups.create(c.userId, msg.name, msg.members);
+            break;
+          case 'group_rename':
+            c.room.groups.rename(c.userId, msg.group, msg.name);
+            break;
+          case 'group_add':
+            c.room.groups.add(c.userId, msg.group, msg.members);
+            break;
+          case 'group_leave':
+            c.room.groups.leave(c.userId, msg.group);
+            break;
+          case 'plan_open':
+            c.room.groups.planOpen(c, msg.channel);
+            break;
+          case 'plan_op':
+            c.room.groups.planOp(c.userId, msg.channel, msg.op);
             break;
           case 'join':
             c.room.join({ id: c.userId, username: c.username });
@@ -84,18 +109,22 @@ export function attachWebSocket(server: Server, deps: { auth: Auth; rooms: RoomM
             deps.log(`room ${c.room.code} settings changed by ${c.username}: ${JSON.stringify(msg.changes).slice(0, 300)}`);
             break;
           case 'start':
-            c.room.requestStart(c.userId);
-            deps.log(`room ${c.room.code} started by ${c.username}`);
+            c.room.requestStart(c.userId, msg.settings);
+            deps.log(`room ${c.room.code} started by ${c.username}${msg.settings ? ` with unsaved settings ${JSON.stringify(msg.settings).slice(0, 300)}` : ''}`);
+            break;
+          case 'peace':
+            c.room.peace(c.userId, msg.op);
+            deps.log(`room ${c.room.code} peace ${String(msg.op)} by ${c.username}`);
             break;
           default:
             break;
         }
       } catch (err) {
         if (err instanceof RoomError) {
-          send({ type: 'notice', level: 'error', message: err.message });
+          send({ type: 'notice', level: 'error', message: err.message, ...errorFields(err.message) });
         } else {
           deps.log(`ws message failed: ${(err as Error).stack ?? err}`);
-          send({ type: 'notice', level: 'error', message: 'Server error' });
+          send({ type: 'notice', level: 'error', message: 'Server error', code: 'serverError' });
         }
       }
     });

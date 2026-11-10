@@ -6,9 +6,13 @@ import { BIO_MAX, DISPLAY_NAME_MAX, parseBio, parseDisplayName, parseTelegram, t
 import type { MyProfile, PublicProfile, UserInfo } from '../../shared/protocol.ts';
 import { api } from './api.ts';
 import { AvatarCropper, loadImageFile } from './avatar-crop.ts';
-import { flagImg, h, replaceChildren, toast } from './dom.ts';
-import { logout } from './nav.ts';
-import { icon, MenuButton } from './ui.ts';
+import { flagImg, h, onCloseTransient, replaceChildren, toast } from './dom.ts';
+import { ratingBadges } from './leaderboard.ts';
+import { logout, navigate } from './nav.ts';
+import { bellIcon, openNotifySettings } from './notify-panel.ts';
+import { icon, MenuButton, type Label } from './ui.ts';
+import { errorText } from './errors.ts';
+import { fmtDate, L, lang, onLang, setLang, t, T } from './i18n.ts';
 
 const PHONE = '(max-width: 640px)';
 const HINT_KEY = 'alliance.profileHint';
@@ -19,7 +23,7 @@ let mine: MyProfile | null = null;
 const listeners = new Set<() => void>();
 
 export function setMyProfile(p: MyProfile | null | undefined, user: UserInfo): void {
-  mine = p ?? { username: user.username, displayName: null, bio: null, telegram: null, avatarUrl: null, joinedAt: 0, games: 0, wins: 0, updatedAt: null };
+  mine = p ?? { username: user.username, displayName: null, bio: null, telegram: null, avatarUrl: null, joinedAt: 0, games: 0, wins: 0, rating: 1000, ratedGames: 0, winPoints: 0, updatedAt: null };
   publicCache.delete(mine.username.toLowerCase());
   for (const fn of [...listeners]) fn();
 }
@@ -63,7 +67,7 @@ export function avatarEl(url: string | null | undefined, name: string, size: 'xs
 
 // ------------------------------------------------------------------ layers (modal / popover / sheet)
 
-interface Layer {
+export interface Layer {
   close(): void;
   panel: HTMLElement;
 }
@@ -80,7 +84,7 @@ function focusables(root: HTMLElement): HTMLElement[] {
  * A dialog over the page. Desktop: a centred modal, or a popover next to `anchor`.
  * Phone: always a bottom sheet. Focus stays inside; Esc, the backdrop or close() dismiss it.
  */
-function openLayer(o: { label: string; content: HTMLElement; kind: 'modal' | 'popover'; anchor?: HTMLElement | null; cls?: string; onClose?: () => void; initialFocus?: HTMLElement | null }): Layer {
+export function openLayer(o: { label: Label; content: HTMLElement; kind: 'modal' | 'popover'; anchor?: HTMLElement | null; cls?: string; onClose?: () => void; initialFocus?: HTMLElement | null }): Layer {
   const phone = matchMedia(PHONE).matches;
   const kind = phone ? 'sheet' : o.kind;
   const returnTo = document.activeElement as HTMLElement | null;
@@ -92,11 +96,13 @@ function openLayer(o: { label: string; content: HTMLElement; kind: 'modal' | 'po
     o.content,
   );
   let closed = false;
+  let offTransient: () => void = () => undefined;
   const layer: Layer = {
     panel,
     close() {
       if (closed) return;
       closed = true;
+      offTransient();
       const i = layers.indexOf(layer);
       if (i >= 0) layers.splice(i, 1);
       panel.classList.remove('in');
@@ -156,6 +162,7 @@ function openLayer(o: { label: string; content: HTMLElement; kind: 'modal' | 'po
   document.body.append(backdrop, panel);
   if (kind !== 'popover') document.documentElement.classList.add('pf-locked');
   layers.push(layer);
+  offTransient = onCloseTransient(() => layer.close());
   place();
   window.addEventListener('resize', place);
   requestAnimationFrame(() => {
@@ -172,17 +179,24 @@ function openLayer(o: { label: string; content: HTMLElement; kind: 'modal' | 'po
 
 /** Avatar + display name in the top bar; opens a menu with Profile and Log out. */
 export function userMenu(user: UserInfo, compact = false): HTMLElement {
-  const menu = new MenuButton<'profile' | 'logout'>({
+  const menu = new MenuButton<'profile' | 'leaderboard' | 'notify' | 'lang' | 'logout'>({
     trigger: [],
-    label: 'Account',
+    label: L('auth.account'),
     cls: `ghost small user-menu ${compact ? 'compact' : ''}`,
     minWidth: 200,
     options: () => [
-      { value: 'profile', label: 'Profile', lead: () => icon('user') },
-      { value: 'logout', label: 'Log out', lead: () => icon('logout') },
+      { value: 'profile', label: t('pf.menuProfile'), lead: () => icon('user') },
+      { value: 'leaderboard', label: t('lb.title'), lead: () => icon('crown') },
+      { value: 'notify', label: t('nt.menu'), lead: () => bellIcon() },
+      // The other language, by its own name (the top bar also has the EN / RU switch).
+      { value: 'lang', label: lang() === 'ru' ? 'English' : 'Русский', hint: lang() === 'ru' ? 'EN' : 'RU', lead: () => icon('globe') },
+      { value: 'logout', label: t('pf.menuLogout'), lead: () => icon('logout') },
     ],
     onPick: (v) => {
       if (v === 'profile') openProfileEditor(user);
+      else if (v === 'leaderboard') navigate('/leaderboard');
+      else if (v === 'notify') openNotifySettings(null);
+      else if (v === 'lang') setLang(lang() === 'ru' ? 'en' : 'ru');
       else logout();
     },
   });
@@ -195,11 +209,14 @@ export function userMenu(user: UserInfo, compact = false): HTMLElement {
       compact ? null : h('span', { class: 'user-menu-name' }, name),
       compact ? null : icon('chevron', 'user-menu-caret'),
     );
-    menu.el.setAttribute('aria-label', `Account: ${name}`);
-    menu.el.title = `Signed in as @${user.username}`;
+    menu.el.setAttribute('aria-label', t('pf.accountOf', { name }));
+    menu.el.title = t('pf.signedInAs', { username: user.username });
   };
   render();
   whileMounted(menu.el, render);
+  onLang(() => {
+    if (menu.el.isConnected) render();
+  });
   return menu.el;
 }
 
@@ -217,7 +234,6 @@ function fetchPublic(username: string): Promise<PublicProfile> {
   return p;
 }
 
-const MONTH = new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' });
 
 function telegramButton(handle: string, cls = 'btn secondary'): HTMLAnchorElement {
   return h(
@@ -239,21 +255,33 @@ export interface PlayerContext {
 
 /** Opens a player's public profile: a popover by `anchor` (desktop) or a bottom sheet (phone). */
 export function openPublicProfile(username: string, anchor: HTMLElement | null, ctx: PlayerContext = {}): void {
-  const body = h('div', { class: 'pf-card', 'aria-busy': 'true' }, h('div', { class: 'pf-card-loading' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Loading profile…'));
-  const layer = openLayer({ label: `Profile of ${ctx.nickname ?? username}`, content: body, kind: 'popover', anchor, cls: 'pf-pop' });
+  const body = h('div', { class: 'pf-card', 'aria-busy': 'true' }, h('div', { class: 'pf-card-loading' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), T('pf.loading')));
+  let offLang: () => void = () => undefined;
+  const layer = openLayer({ label: L('lb.profileOf', { name: ctx.nickname ?? username }), content: body, kind: 'popover', anchor, cls: 'pf-pop', onClose: () => offLang() });
   const isMe = !!ctx.me && ctx.me.username.toLowerCase() === username.toLowerCase();
   const source: Promise<PublicProfile> = isMe && mine ? Promise.resolve(mine) : fetchPublic(username);
   source.then(
     (p) => {
+      offLang();
+      offLang = onLang(() => paint(p, false));
+      paint(p, true);
+    },
+    (err: Error) => {
+      body.removeAttribute('aria-busy');
+      replaceChildren(body, h('p', { class: 'form-error', role: 'alert' }, err.message), h('button', { class: 'btn ghost small', type: 'button', onclick: () => layer.close() }, T('common.close')));
+    },
+  );
+  function paint(p: PublicProfile, focus: boolean): void {
+    {
       const name = shownName(p);
-      const closeBtn = h('button', { class: 'btn ghost small pf-x', type: 'button', 'aria-label': 'Close', onclick: () => layer.close() }, icon('close'));
+      const closeBtn = h('button', { class: 'btn ghost small pf-x', type: 'button', 'aria-label': t('common.close'), onclick: () => layer.close() }, icon('close'));
       const stats: string[] = [];
-      if (p.joinedAt) stats.push(`Joined ${MONTH.format(p.joinedAt)}`);
-      stats.push(`${p.games} ${p.games === 1 ? 'game' : 'games'}`);
-      if (p.wins) stats.push(`${p.wins} ${p.wins === 1 ? 'win' : 'wins'}`);
+      if (p.joinedAt) stats.push(t('pf.joined', { date: fmtDate(p.joinedAt, { month: 'long', year: 'numeric' }) }));
+      stats.push(t('unit.games', { n: p.games }));
+      if (p.wins) stats.push(t('unit.wins', { n: p.wins }));
       const roomLine =
         ctx.flag || (ctx.nickname && ctx.nickname !== name)
-          ? h('p', { class: 'pf-room' }, ctx.flag ? h('span', { class: 'seal' }, flagImg(ctx.flag)) : null, h('span', null, h('span', { class: 'muted' }, 'In this room as '), h('strong', null, ctx.nickname ?? name)))
+          ? h('p', { class: 'pf-room' }, ctx.flag ? h('span', { class: 'seal' }, flagImg(ctx.flag)) : null, h('span', null, h('span', { class: 'muted' }, t('pf.inRoomAs'), ' '), h('strong', null, ctx.nickname ?? name)))
           : null;
       body.removeAttribute('aria-busy');
       replaceChildren(
@@ -266,7 +294,8 @@ export function openPublicProfile(username: string, anchor: HTMLElement | null, 
           h('div', { class: 'pf-card-id' }, h('h2', { class: 'pf-card-name display' }, name), h('span', { class: 'pf-handle' }, `@${p.username}`)),
         ),
         roomLine,
-        p.bio ? h('p', { class: 'pf-bio' }, p.bio) : h('p', { class: 'pf-bio empty' }, isMe ? 'You have not written anything about yourself yet.' : 'No dossier on file.'),
+        p.bio ? h('p', { class: 'pf-bio' }, p.bio) : h('p', { class: 'pf-bio empty' }, isMe ? t('pf.noBioMe') : t('pf.noBio')),
+        ratingBadges(p),
         h('p', { class: 'pf-stats' }, stats.join('  ·  ')),
         h(
           'div',
@@ -284,18 +313,14 @@ export function openPublicProfile(username: string, anchor: HTMLElement | null, 
                   },
                 },
                 icon('user'),
-                'Edit profile',
+                t('pf.edit'),
               )
             : null,
         ),
       );
-      (body.querySelector<HTMLElement>('.tg-link') ?? closeBtn).focus({ preventScroll: true });
-    },
-    (err: Error) => {
-      body.removeAttribute('aria-busy');
-      replaceChildren(body, h('p', { class: 'form-error', role: 'alert' }, err.message), h('button', { class: 'btn ghost small', type: 'button', onclick: () => layer.close() }, 'Close'));
-    },
-  );
+      if (focus) (body.querySelector<HTMLElement>('.tg-link') ?? closeBtn).focus({ preventScroll: true });
+    }
+  }
 }
 
 /** Makes `el` open the player's profile on click / Enter. */
@@ -315,7 +340,7 @@ export function playerNameButton(p: { nickname: string; username?: string; flag?
   if (!p.username) return h('span', { class: cls }, p.nickname);
   const btn = h(
     'button',
-    { class: `${cls} pf-name`, type: 'button', title: `@${p.username}: view profile`, 'aria-label': `${p.nickname}, view profile` },
+    { class: `${cls} pf-name`, type: 'button', title: L('pf.viewTitle', { username: p.username }), 'aria-label': L('pf.viewAria', { name: p.nickname }) },
     h('span', { class: 'pf-name-text' }, p.nickname),
   );
   return profileTrigger(btn, p.username, { nickname: p.nickname, flag: p.flag, me });
@@ -345,7 +370,7 @@ export function openProfileEditor(user: UserInfo): void {
   if (editorOpen) return;
   editorOpen = true;
   dismissProfileHint();
-  const start: MyProfile = mine ?? { username: user.username, displayName: null, bio: null, telegram: null, avatarUrl: null, joinedAt: 0, games: 0, wins: 0, updatedAt: null };
+  const start: MyProfile = mine ?? { username: user.username, displayName: null, bio: null, telegram: null, avatarUrl: null, joinedAt: 0, games: 0, wins: 0, rating: 1000, ratedGames: 0, winPoints: 0, updatedAt: null };
   /** Avatar plan: keep, replace with the cropper's result, or remove. */
   let avatarPlan: 'keep' | 'new' | 'remove' = 'keep';
   let cropper: AvatarCropper | null = null;
@@ -361,18 +386,22 @@ export function openProfileEditor(user: UserInfo): void {
   const nameCount = h('span', { class: 'pf-count num', 'aria-live': 'off' });
   const nameErr = h('p', { class: 'pf-field-msg', id: 'pf-name-msg' });
 
-  const bioInput = h('textarea', { id: 'pf-bio', rows: 4, maxlength: BIO_MAX + 50, placeholder: 'A line or two: who you are, how you play, what you never forgive.' });
+  const bioInput = h('textarea', { id: 'pf-bio', rows: 4, maxlength: BIO_MAX + 50, placeholder: L('pf.bioPlaceholder') });
   bioInput.value = start.bio ?? '';
   const bioCount = h('span', { class: 'pf-count num', id: 'pf-bio-count' });
   const bioErr = h('p', { class: 'pf-field-msg' });
 
-  const tgInput = h('input', { id: 'pf-tg', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: '@username or t.me/username', inputmode: 'url', 'aria-describedby': 'pf-tg-msg' });
+  const tgInput = h('input', { id: 'pf-tg', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: L('pf.tgPlaceholder'), inputmode: 'url', 'aria-describedby': 'pf-tg-msg' });
   tgInput.value = start.telegram ? `@${start.telegram}` : '';
   const tgMsg = h('p', { class: 'pf-field-msg', id: 'pf-tg-msg', 'aria-live': 'polite' });
 
-  const saveBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('check'), 'Save profile');
-  const cancelBtn = h('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
-  const closeBtn = h('button', { class: 'btn ghost small pf-x', type: 'button', 'aria-label': 'Close' }, icon('close'));
+  const saveBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('check'), T('pf.save'));
+  const cancelBtn = h('button', { class: 'btn ghost', type: 'button' }, T('common.cancel'));
+  const closeBtn = h('button', { class: 'btn ghost small pf-x', type: 'button', 'aria-label': L('common.close') }, icon('close'));
+  let lastError: unknown = null;
+  const paintError = (): void => {
+    error.textContent = lastError === null ? '' : typeof lastError === 'string' ? t('pf.fixFields') : (lastError as Error).message;
+  };
 
   function renderAvatar(): void {
     const name = parseDisplayName(nameInput.value);
@@ -381,9 +410,9 @@ export function openProfileEditor(user: UserInfo): void {
       replaceChildren(avatarBox, cropper.el);
       replaceChildren(
         avatarActions,
-        h('p', { class: 'pf-crop-hint muted' }, 'Drag to frame, zoom to fit. The circle is what others see.'),
-        h('button', { class: 'btn ghost small', type: 'button', onclick: () => fileInput.click() }, icon('camera'), 'Another photo'),
-        h('button', { class: 'btn ghost small', type: 'button', onclick: () => discardCrop() }, 'Undo'),
+        h('p', { class: 'pf-crop-hint muted' }, t('pf.cropHint')),
+        h('button', { class: 'btn ghost small', type: 'button', onclick: () => fileInput.click() }, icon('camera'), t('pf.anotherPhoto')),
+        h('button', { class: 'btn ghost small', type: 'button', onclick: () => discardCrop() }, t('pf.undo')),
       );
       return;
     }
@@ -391,10 +420,10 @@ export function openProfileEditor(user: UserInfo): void {
     replaceChildren(avatarBox, avatarEl(url, label, 'xl'));
     replaceChildren(
       avatarActions,
-      h('button', { class: 'btn secondary small', type: 'button', onclick: () => fileInput.click() }, icon('camera'), url ? 'Change photo' : 'Upload photo'),
-      url ? h('button', { class: 'btn ghost small', type: 'button', onclick: () => ((avatarPlan = 'remove'), renderAvatar()) }, icon('trash'), 'Remove') : null,
-      avatarPlan === 'remove' && start.avatarUrl ? h('button', { class: 'btn ghost small', type: 'button', onclick: () => ((avatarPlan = 'keep'), renderAvatar()) }, 'Undo') : null,
-      h('p', { class: 'pf-crop-hint muted' }, 'PNG, JPEG or WebP. Cropped to a square here, before upload.'),
+      h('button', { class: 'btn secondary small', type: 'button', onclick: () => fileInput.click() }, icon('camera'), url ? t('pf.changePhoto') : t('pf.uploadPhoto')),
+      url ? h('button', { class: 'btn ghost small', type: 'button', onclick: () => ((avatarPlan = 'remove'), renderAvatar()) }, icon('trash'), t('pf.remove')) : null,
+      avatarPlan === 'remove' && start.avatarUrl ? h('button', { class: 'btn ghost small', type: 'button', onclick: () => ((avatarPlan = 'keep'), renderAvatar()) }, t('pf.undo')) : null,
+      h('p', { class: 'pf-crop-hint muted' }, t('pf.photoHint')),
     );
   }
 
@@ -426,7 +455,7 @@ export function openProfileEditor(user: UserInfo): void {
     const len = [...nameInput.value.trim()].length;
     nameCount.textContent = `${len}/${DISPLAY_NAME_MAX}`;
     nameCount.classList.toggle('over', len > DISPLAY_NAME_MAX);
-    nameErr.textContent = n.ok ? (n.value ? '' : `Empty: others see your username, ${user.username}.`) : n.error;
+    nameErr.textContent = n.ok ? (n.value ? '' : t('pf.nameEmpty', { username: user.username })) : errorText(n.error);
     nameErr.classList.toggle('bad', !n.ok);
     nameInput.setAttribute('aria-invalid', String(!n.ok));
 
@@ -434,17 +463,17 @@ export function openProfileEditor(user: UserInfo): void {
     const blen = [...bioInput.value.trim()].length;
     bioCount.textContent = `${blen}/${BIO_MAX}`;
     bioCount.classList.toggle('over', blen > BIO_MAX);
-    bioErr.textContent = b.ok ? '' : b.error;
+    bioErr.textContent = b.ok ? '' : errorText(b.error);
     bioErr.classList.toggle('bad', !b.ok);
     bioInput.setAttribute('aria-invalid', String(!b.ok));
 
-    const t = parseTelegram(tgInput.value);
-    tgInput.setAttribute('aria-invalid', String(!t.ok));
-    tgMsg.classList.toggle('bad', !t.ok);
-    if (!t.ok) replaceChildren(tgMsg, t.error);
-    else if (t.value) replaceChildren(tgMsg, icon('check', 'ok-mark'), 'Opens ', h('a', { href: telegramUrl(t.value), target: '_blank', rel: 'noopener noreferrer', class: 'tg-preview' }, `t.me/${t.value}`, icon('external', 'tg-ext')));
-    else replaceChildren(tgMsg, 'Optional. Lets players message you outside the game.');
-    return n.ok && b.ok && t.ok;
+    const tg = parseTelegram(tgInput.value);
+    tgInput.setAttribute('aria-invalid', String(!tg.ok));
+    tgMsg.classList.toggle('bad', !tg.ok);
+    if (!tg.ok) replaceChildren(tgMsg, errorText(tg.error));
+    else if (tg.value) replaceChildren(tgMsg, icon('check', 'ok-mark'), t('pf.opens'), ' ', h('a', { href: telegramUrl(tg.value), target: '_blank', rel: 'noopener noreferrer', class: 'tg-preview' }, `t.me/${tg.value}`, icon('external', 'tg-ext')));
+    else replaceChildren(tgMsg, t('pf.tgOptional'));
+    return n.ok && b.ok && tg.ok;
   }
   for (const el of [nameInput, bioInput, tgInput]) el.addEventListener('input', () => validate());
   nameInput.addEventListener('input', () => {
@@ -453,9 +482,11 @@ export function openProfileEditor(user: UserInfo): void {
 
   async function save(): Promise<void> {
     if (busy) return;
-    error.textContent = '';
+    lastError = null;
+    paintError();
     if (!validate()) {
-      error.textContent = 'Fix the highlighted fields first.';
+      lastError = 'fix';
+      paintError();
       return;
     }
     busy = true;
@@ -471,17 +502,18 @@ export function openProfileEditor(user: UserInfo): void {
       }
       const n = parseDisplayName(nameInput.value);
       const b = parseBio(bioInput.value);
-      const t = parseTelegram(tgInput.value);
+      const tg = parseTelegram(tgInput.value);
       const changes: Record<string, string | null> = {};
       if (n.ok && n.value !== start.displayName) changes.displayName = n.value;
       if (b.ok && b.value !== start.bio) changes.bio = b.value;
-      if (t.ok && t.value !== start.telegram) changes.telegram = t.value;
+      if (tg.ok && tg.value !== start.telegram) changes.telegram = tg.value;
       if (Object.keys(changes).length) latest = (await api<{ profile: MyProfile }>('PATCH', '/api/profile', changes)).profile;
       if (latest) setMyProfile(latest, user);
-      toast(latest ? 'Profile saved' : 'Nothing to change', 'good', 2200, latest ? icon('check') : null);
+      toast(latest ? t('pf.saved') : t('pf.nothing'), 'good', 2200, latest ? icon('check') : null);
       layer.close();
     } catch (err) {
-      error.textContent = (err as Error).message;
+      lastError = err;
+      paintError();
     } finally {
       busy = false;
       saveBtn.disabled = false;
@@ -495,28 +527,28 @@ export function openProfileEditor(user: UserInfo): void {
     h(
       'header',
       { class: 'pf-editor-head' },
-      h('div', null, h('p', { class: 'eyebrow' }, 'Dossier'), h('h2', { class: 'pf-editor-title display', id: 'pf-title' }, 'Your profile')),
+      h('div', null, h('p', { class: 'eyebrow' }, T('pf.dossier')), h('h2', { class: 'pf-editor-title display', id: 'pf-title' }, T('pf.yourProfile'))),
       closeBtn,
     ),
     h(
       'div',
       { class: 'pf-editor-body' },
-      h('section', { class: 'pf-avatar-col', 'aria-label': 'Profile picture' }, avatarBox, avatarActions, fileInput),
+      h('section', { class: 'pf-avatar-col', 'aria-label': L('pf.picture') }, avatarBox, avatarActions, fileInput, ratingBadges(start)),
       h(
         'div',
         { class: 'pf-fields' },
         h(
           'div',
           { class: 'pf-field' },
-          h('div', { class: 'pf-label-row' }, h('label', { class: 'field-label', for: 'pf-name' }, 'Display name'), nameCount),
+          h('div', { class: 'pf-label-row' }, h('label', { class: 'field-label', for: 'pf-name' }, T('pf.displayName')), nameCount),
           nameInput,
           nameErr,
-          h('p', { class: 'pf-login-note' }, icon('lock'), h('span', null, h('strong', null, `@${user.username}`), ' — used to log in. It never changes.')),
+          h('p', { class: 'pf-login-note' }, icon('lock'), h('span', null, h('strong', null, `@${user.username}`), ' ', T('pf.loginNote'))),
         ),
         h(
           'div',
           { class: 'pf-field' },
-          h('div', { class: 'pf-label-row' }, h('label', { class: 'field-label', for: 'pf-bio' }, 'About you'), bioCount),
+          h('div', { class: 'pf-label-row' }, h('label', { class: 'field-label', for: 'pf-bio' }, T('pf.about')), bioCount),
           bioInput,
           bioErr,
         ),
@@ -533,13 +565,19 @@ export function openProfileEditor(user: UserInfo): void {
 
   renderAvatar();
   validate();
+  const offLang = onLang(() => {
+    renderAvatar();
+    validate();
+    paintError();
+  });
   const layer = openLayer({
-    label: 'Your profile',
+    label: L('pf.yourProfile'),
     content: form,
     kind: 'modal',
     cls: 'pf-modal',
     initialFocus: nameInput,
     onClose: () => {
+      offLang();
       editorOpen = false;
       cropper?.destroy();
     },
@@ -581,13 +619,13 @@ export function profileHint(user: UserInfo): HTMLElement | null {
   if (!flagged || (p && (p.displayName || p.avatarUrl || p.bio || p.telegram))) return null;
   const card = h(
     'section',
-    { class: 'card pf-hint', 'aria-label': 'Set up your profile' },
+    { class: 'card pf-hint', 'aria-label': L('pf.setUpTitle') },
     avatarEl(null, user.username, 'md'),
     h(
       'div',
       { class: 'pf-hint-text' },
-      h('strong', null, 'Set up your profile'),
-      h('span', { class: 'muted' }, 'A photo, a name others see, a line about you, your Telegram. All optional.'),
+      h('strong', null, T('pf.setUpTitle')),
+      h('span', { class: 'muted' }, T('pf.setUpText')),
     ),
     h(
       'div',
@@ -602,15 +640,15 @@ export function profileHint(user: UserInfo): HTMLElement | null {
             openProfileEditor(user);
           },
         },
-        'Set up',
+        T('pf.setUp'),
       ),
       h(
         'button',
         {
           class: 'btn ghost small',
           type: 'button',
-          'aria-label': 'Dismiss',
-          title: 'Not now',
+          'aria-label': L('pf.dismiss'),
+          title: L('pf.notNow'),
           onclick: () => {
             dismissProfileHint();
             card.remove();
