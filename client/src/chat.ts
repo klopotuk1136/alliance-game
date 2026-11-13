@@ -78,6 +78,7 @@ export class ChatPanel {
     });
     bindAttr(this.picker.el, 'title', 'chat.whisperTitle');
     this.newGroupBtn.addEventListener('click', () => this.createGroup());
+    this.bindTabScrolling();
     // The panel lives as long as the room page. A language switch re-renders tabs, the
     // channel head and the message list; the draft, the open channel and an open plan stay.
     onLang(() => {
@@ -182,6 +183,71 @@ export class ChatPanel {
       return;
     }
     if (this.plan?.channel === msg.channel) this.plan.apply(msg.event as PlanEvent);
+  }
+
+  // ---------------------------------------------------------------- tab strip
+
+  /**
+   * The tab strip scrolls sideways and has no scrollbar. Touch screens and trackpads swipe it
+   * natively; for a mouse, the wheel scrolls it sideways and it can be dragged.
+   */
+  private bindTabScrolling(): void {
+    const strip = this.tabsEl;
+    strip.addEventListener(
+      'wheel',
+      (ev) => {
+        if (ev.ctrlKey || Math.abs(ev.deltaX) >= Math.abs(ev.deltaY)) return; // zoom, or already sideways
+        const max = strip.scrollWidth - strip.clientWidth;
+        if (max <= 0) return;
+        const delta = ev.deltaMode === WheelEvent.DOM_DELTA_LINE ? ev.deltaY * 16 : ev.deltaY;
+        // At either end the wheel goes back to scrolling the page.
+        if ((delta < 0 && strip.scrollLeft <= 0) || (delta > 0 && strip.scrollLeft >= max - 1)) return;
+        ev.preventDefault();
+        strip.scrollLeft += delta;
+      },
+      { passive: false },
+    );
+
+    let drag: { id: number; x: number; left: number; moved: boolean } | null = null;
+    strip.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType !== 'mouse' || ev.button !== 0 || strip.scrollWidth <= strip.clientWidth) return;
+      drag = { id: ev.pointerId, x: ev.clientX, left: strip.scrollLeft, moved: false };
+    });
+    strip.addEventListener('pointermove', (ev) => {
+      if (!drag || ev.pointerId !== drag.id) return;
+      const dx = ev.clientX - drag.x;
+      if (!drag.moved && Math.abs(dx) < 5) return;
+      if (!drag.moved) {
+        drag.moved = true;
+        strip.setPointerCapture(ev.pointerId);
+        strip.classList.add('dragging');
+      }
+      strip.scrollLeft = drag.left - dx;
+    });
+    // A drag that ends over a tab must not also switch to it: swallow the click that follows.
+    const stopClick = (e: Event): void => e.stopPropagation();
+    const end = (ev: PointerEvent): void => {
+      if (!drag || ev.pointerId !== drag.id) return;
+      if (drag.moved) {
+        strip.classList.remove('dragging');
+        strip.addEventListener('click', stopClick, true);
+        setTimeout(() => strip.removeEventListener('click', stopClick, true), 0);
+      }
+      drag = null;
+    };
+    strip.addEventListener('pointerup', end);
+    strip.addEventListener('pointercancel', end);
+
+    strip.addEventListener('scroll', () => this.updateTabFades(), { passive: true });
+    new ResizeObserver(() => this.updateTabFades()).observe(strip);
+  }
+
+  /** Fades the edge of the tab strip on each side that has more tabs past it. */
+  private updateTabFades(): void {
+    const strip = this.tabsEl;
+    const max = strip.scrollWidth - strip.clientWidth;
+    strip.classList.toggle('more-left', max > 0 && strip.scrollLeft > 1);
+    strip.classList.toggle('more-right', max > 0 && strip.scrollLeft < max - 1);
   }
 
   // ---------------------------------------------------------------- helpers
@@ -558,6 +624,7 @@ export class ChatPanel {
       if (tr.left < sr.left) this.tabsEl.scrollLeft += tr.left - sr.left - 8;
       else if (tr.right > sr.right) this.tabsEl.scrollLeft += tr.right - sr.right + 8;
     }
+    this.updateTabFades();
 
     // Picker: start a private conversation with anyone else in the room.
     const others = st.players.filter((p) => p.pid !== myPid).length;

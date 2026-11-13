@@ -1993,6 +1993,26 @@ kbd,
 .chat-tabs::-webkit-scrollbar {
   display: none;
 }
+/* Fade an edge when more tabs are hidden past it (classes set in chat.ts). */
+.chat-tabs {
+  --fade-l: 0px;
+  --fade-r: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--fade-l), #000 calc(100% - var(--fade-r)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--fade-l), #000 calc(100% - var(--fade-r)), transparent 100%);
+}
+.chat-tabs.more-left {
+  --fade-l: 28px;
+}
+.chat-tabs.more-right {
+  --fade-r: 28px;
+}
+.chat-tabs.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.chat-tabs.dragging .chat-tab {
+  cursor: grabbing;
+}
 .chat-tab {
   flex: none;
   display: inline-flex;
@@ -3332,6 +3352,11 @@ kbd,
     overscroll-behavior: contain;
     margin-right: -6px;
     padding-right: 6px;
+  }
+  /* The chat keeps a usable height; when the column runs out of room, the column scrolls
+     instead of squeezing the chat down to a line or two. */
+  .side > .dock {
+    min-height: clamp(420px, 58vh, 600px);
   }
   .roster .players-card {
     flex: 0 1 auto;
